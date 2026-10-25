@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow"><p class="eyebrow">学院社会实践</p><h1>登录材料平台</h1>
+<p>请使用管理员分配的账号登录。</p>
+<form method="post">{% csrf_token %}{{ form.as_p }}
+<input type="hidden" name="next" value="{{ next }}"><button type="submit">登录</button></form>
+</section>{% endblock %}

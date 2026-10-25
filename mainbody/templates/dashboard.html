@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="eyebrow">学院社会实践</p><h1>材料提交工作台</h1>
+<p class="lead">{{ user.real_name|default:user.username }}，你好。</p>
+<section class="card"><h2>平台正在建设中</h2><p>活动与材料提交页面尚未开放。开放后，你可以在这里查看活动、提交申请表和实践成果。</p></section>
+{% if user.is_staff %}<p><a href="/admin/">进入管理后台</a></p>{% endif %}
+{% endblock %}

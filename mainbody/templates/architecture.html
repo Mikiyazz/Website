@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}开发模块总览{% endblock %}
+{% block content %}
+<p class="eyebrow">开发环境 · 框架 0.1</p><h1>项目模块总览</h1>
+<p class="lead">页面与接口 → 业务服务 → PostgreSQL / 后台任务 / 对象存储接口</p>
+<div class="grid">
+<section class="card"><h2>账号与活动</h2><p>accounts / activities</p><p>用户角色、学院名单、活动时间和材料规则。</p></section>
+<section class="card"><h2>提交与文件</h2><p>submissions / uploads</p><p>草稿版本、上传额度与分片直传接口。</p></section>
+<section class="card"><h2>检查与审核</h2><p>validation / reviews</p><p>检查结果、审核范围与版本化结论。</p></section>
+<section class="card"><h2>后台与交付</h2><p>jobs / exports / audit / news</p><p>持久任务、导出记录、审计与可选新闻稿。</p></section>
+</div><section class="card"><h2>当前边界</h2><p>已提供数据库模型、草稿接口、并发保护示例和任务恢复机制。对象存储、正式提交、审核和批量导出仍需接入。当前没有正式收取学生材料。</p></section>
+<p><a href="/accounts/login/">登录页面</a> · <a href="/health/live/">进程健康状态</a></p>
+{% endblock %}

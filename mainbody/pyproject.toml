@@ -1,0 +1,12 @@
+[project]
+name = "college-practice-platform"
+version = "0.1.0"
+description = "Modular scaffold for college social-practice submissions"
+requires-python = ">=3.12,<3.14"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["postgresql: requires a real PostgreSQL database for concurrent transactions"]

@@ -1,0 +1,6 @@
+# Optional local Python workflow; publish databases to loopback only.
+services:
+  db:
+    ports: ["127.0.0.1:5432:5432"]
+  redis:
+    ports: ["127.0.0.1:6379:6379"]

@@ -1,0 +1,9 @@
+{% load static %}
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}学院社会实践材料平台{% endblock %}</title>
+<link rel="stylesheet" href="{% static 'css/app.css' %}"></head>
+<body><header><span class="mark">实</span><strong>学院社会实践材料平台</strong>
+{% if user.is_authenticated %}<form action="{% url 'logout' %}" method="post">{% csrf_token %}<button class="quiet" type="submit">退出登录</button></form>{% endif %}
+</header><main>{% block content %}{% endblock %}</main></body></html>
