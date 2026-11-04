@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>学生注册</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box;font-family:"Microsoft YaHei",sans-serif;}
+        body{background-color:#f5f5f5;display:flex;justify-content:center;align-items:center;height:100vh;}
+        .register-box{background-color:#fff;width:420px;padding:32px;border-radius:12px;box-shadow:0 2px 12px  rgba(0,0,0,0.1);}
+        .register-box h2{text-align:center;margin-bottom:24px;color:#333;}
+        .item{margin-bottom:16px;}
+        .item label {
+            display: block;
+            margin-bottom: 6px;
+            color: #555;
+        }
+        .item input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 15px;
+        }
+        .item input:focus {
+            outline: none;
+            border-color: #409eff;
+        }
+        button {
+            width: 100%;
+            padding: 11px;
+            background-color: #409eff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #337ecc;
+        }
+        .rule-tip{
+            color:#666;
+            font-size:12px;
+            margin-top:4px;
+        }
+        .tip{
+            color:red;
+            font-size:12px;
+            margin-top:4px;
+            display:none;
+        }
+    </style>
+</head>
+<body>
+    <div class="register-box">
+        <h2>学生账号注册</h2>
+        <form action="" method="post">
+            <div class="item">
+                <label>学号(8位数字)</label>
+                <input type="text" name="student_id" maxlength="8" pattern="[0-9]{8}" required placeholder="请输入8位学号">
+            </div>
+            <div class="item">
+                <label>真实姓名</label>
+                <input type="text" name="name" required placeholder="请输入真实姓名">
+            </div>
+            <div class="item">
+                <label>班级</label>
+                <input type="text" name="class" required placeholder="例如:计算机类2601">
+            </div>
+            <div class="item">
+                <label>设置密码</label>
+                <input type="password" name="password" id="pwd" required placeholder="设置登录密码">
+                <div class="rule-tip">密码规则:至少六位,必须同时包含数字和字母</div>
+                <div class="tip"id="pwdRuleTip">密码不符合要求！</div>
+            </div>
+            <div class="item">
+                <label>确认密码</label>
+                <input type="password" name="password2" id="pwd2"required placeholder="再次输入密码">
+                <div class="tip"id="errTip">两次输入的密码不一致</div>
+            </div>
+            <button type="submit">提交注册</button>
+        </form>
+    </div>
+    <script>
+     const form = document.getElementById('regForm');
+     const pwd = document.getElementById('pwd');
+     const pwd2 = document.getElementById('pwd2');
+     const errTip = document.getElementById('errTip');
+     const pwdRuleTip = document.getElementById('pwdRuleTip');
+
+function checkPwdStrong(password){
+    if(password.length <6) return false;
+    let hasLetter = /[a-zA-Z]/.test(password);
+    let hasNumber = /[0-9]/.test(password);
+    return hasLetter && hasNumber;
+}
+pwd.onblur = function(){
+    pwdRuleTip.style.display = 'none';
+    if(this.value && !checkPwdStrong(this.value)){
+        pwdRuleTip.style.display = 'block';
+    }
+}
+pwd.oninput = function(){
+    pwdRuleTip.style.display = 'none';
+}
+pwd2.oninput = function(){
+    errTip.style.display = 'none';
+    const mainPwd = pwd.value;
+    const rePwd = this.value;
+    if(mainPwd === "") return;
+    let isSame = true;
+    for(let i = 0; i < rePwd.length; i++){
+        if(rePwd[i] !== mainPwd[i]){
+            isSame = false;
+            break;
+        }
+    }
+    if(!isSame){
+        errTip.style.display = 'block';
+    }
+}
+form.onsubmit = function(e){
+    errTip.style.display = 'none';
+    pwdRuleTip.style.display = 'none';
+    let pass = true;
+    if(!checkPwdStrong(pwd.value)){
+        pwdRuleTip.style.display = 'block';
+        pass = false;
+    }
+    if(pwd.value !== pwd2.value){
+        errTip.style.display = 'block';
+        pass = false;
+    }
+    if(!pass){
+        e.preventDefault();
+    }
+}
+</script>
+</body>
+</html>
