@@ -9,5 +9,10 @@ def reviewable_submissions(user, activity_id):
         return Submission.objects.filter(activity_id=activity_id)
     if not user.is_authenticated or not user.is_active or user.role != User.Role.REVIEWER:
         return Submission.objects.none()
-    classes = ReviewAssignment.objects.filter(reviewer=user, activity_id=activity_id).values("class_name")
-    return Submission.objects.filter(activity_id=activity_id, owner__class_name__in=classes)
+    assignments = list(
+        ReviewAssignment.objects.filter(reviewer=user, activity_id=activity_id).values_list("class_name", flat=True)
+    )
+    if not assignments or "" in assignments:
+        return Submission.objects.filter(activity_id=activity_id)
+    allowed_classes = [c.strip() for c in assignments if c and c.strip()]
+    return Submission.objects.filter(activity_id=activity_id, owner__class_name__in=allowed_classes)

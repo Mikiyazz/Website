@@ -11,6 +11,8 @@ class Activity(BaseModel):
     is_open = models.BooleanField(default=False)
     # Empty list means all active students. Explicit class list restricts access.
     allowed_classes = models.JSONField(default=list, blank=True)
+    # Late submission whitelist containing student numbers allowed to save/submit after deadline.
+    late_whitelist_student_numbers = models.JSONField("补交白名单", default=list, blank=True)
     # Conservative scaffold default; the final business quota is configurable.
     quota_bytes_per_student = models.PositiveBigIntegerField(default=10_000_000_000)
 
@@ -24,6 +26,42 @@ class Activity(BaseModel):
     def clean(self):
         if not isinstance(self.allowed_classes, list) or any(not isinstance(x, str) for x in self.allowed_classes):
             raise ValidationError({"allowed_classes": "必须填写班级名称的 JSON 列表。"})
+        if not isinstance(self.late_whitelist_student_numbers, list) or any(
+            not isinstance(x, str) or not x.strip() for x in self.late_whitelist_student_numbers
+        ):
+            raise ValidationError({"late_whitelist_student_numbers": "必须填写补交学生学号字符串的 JSON 列表。"})
+
+    def is_in_late_whitelist(self, student_number: str) -> bool:
+        target = str(student_number or "").strip()
+        if not target:
+            return False
+        whitelist = {str(x).strip() for x in (self.late_whitelist_student_numbers or []) if str(x).strip()}
+        return target in whitelist
+
+    def add_to_late_whitelist(self, *student_numbers, save: bool = True):
+        current = [str(x).strip() for x in (self.late_whitelist_student_numbers or []) if str(x).strip()]
+        seen = set(current)
+        for sn in student_numbers:
+            normalized = str(sn or "").strip()
+            if normalized and normalized not in seen:
+                current.append(normalized)
+                seen.add(normalized)
+        self.late_whitelist_student_numbers = current
+        if save:
+            self.save(update_fields=["late_whitelist_student_numbers", "updated_at"])
+        return self.late_whitelist_student_numbers
+
+    def remove_from_late_whitelist(self, *student_numbers, save: bool = True):
+        to_remove = {str(sn or "").strip() for sn in student_numbers if str(sn or "").strip()}
+        current = [
+            str(x).strip()
+            for x in (self.late_whitelist_student_numbers or [])
+            if str(x).strip() and str(x).strip() not in to_remove
+        ]
+        self.late_whitelist_student_numbers = current
+        if save:
+            self.save(update_fields=["late_whitelist_student_numbers", "updated_at"])
+        return self.late_whitelist_student_numbers
 
     def __str__(self):
         return self.title
@@ -36,6 +74,7 @@ class MaterialRequirement(BaseModel):
     required = models.BooleanField(default=True)
     allowed_extensions = models.JSONField(default=list)
     max_file_bytes = models.PositiveBigIntegerField(default=10_000_000_000)
+    min_count = models.PositiveIntegerField(default=0)
     max_count = models.PositiveIntegerField(default=1)
     rule_version = models.PositiveIntegerField(default=1)
 

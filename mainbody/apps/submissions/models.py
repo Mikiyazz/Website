@@ -4,15 +4,23 @@ from apps.common.models import BaseModel
 
 
 class Submission(BaseModel):
+    class DeclarationType(models.TextChoices):
+        INDIVIDUAL = "individual", "个人"
+        TEAM = "team", "团队"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "草稿"
-        SUBMITTED = "submitted", "待审核"
-        APPROVED = "approved", "已通过"
-        RETURNED = "returned", "退回修改"
+        PENDING_FIRST_REVIEW = "pending_first_review", "待初审"
+        RETURNED = "returned", "打回修改"
+        PENDING_FINAL_REVIEW = "pending_final_review", "待终审"
+        FINAL_APPROVED = "final_approved", "终审通过"
+
+    Status.SUBMITTED = Status.PENDING_FIRST_REVIEW
+    Status.APPROVED = Status.FINAL_APPROVED
 
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     activity = models.ForeignKey("activities.Activity", on_delete=models.PROTECT)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.DRAFT)
     draft_data = models.JSONField(default=dict, blank=True)
     version = models.PositiveIntegerField(default=0)
 

@@ -12,7 +12,7 @@ def fail(code, message, status, request):
                          "request_id": getattr(request, "request_id", "")}, status=status)
 
 
-def endpoint(*methods):
+def endpoint(*methods, require_auth=True):
     def decorate(fn):
         @wraps(fn)
         def wrapped(request, *args, **kwargs):
@@ -20,7 +20,7 @@ def endpoint(*methods):
                 response = fail("method_not_allowed", "不支持此请求方式。", 405, request)
                 response["Allow"] = ", ".join(methods)
                 return response
-            if not request.user.is_authenticated or not request.user.is_active:
+            if require_auth and (not request.user.is_authenticated or not request.user.is_active):
                 return fail("authentication_required", "请先登录。", 401, request)
             try:
                 return fn(request, *args, **kwargs)

@@ -74,14 +74,21 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
 }
-# Application requests contain metadata only. File bytes go directly to object storage.
-DATA_UPLOAD_MAX_MEMORY_SIZE = 1 * 1024 * 1024
-FILE_UPLOAD_MAX_MEMORY_SIZE = 0
-DATA_UPLOAD_MAX_NUMBER_FILES = 0
+# 2C2G memory protection: files > 2.5MB stream directly to temporary disk files.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 2621440
+FILE_UPLOAD_MAX_MEMORY_SIZE = 2621440
+DATA_UPLOAD_MAX_NUMBER_FILES = 20
+FILE_UPLOAD_HANDLERS = [
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]
 MAX_FILE_BYTES = min(env.int("MAX_FILE_BYTES", default=10_000_000_000), 10_000_000_000)
 UPLOAD_PART_BYTES = env.int("UPLOAD_PART_BYTES", default=32 * 1024 * 1024)
 MAX_ACTIVE_UPLOADS_PER_USER = env.int("MAX_ACTIVE_UPLOADS_PER_USER", default=2)

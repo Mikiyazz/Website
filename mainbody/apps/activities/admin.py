@@ -4,8 +4,19 @@ from .models import Activity, MaterialRequirement
 
 @admin.register(Activity)
 class ActivityAdmin(admin.ModelAdmin):
-    list_display = ("title", "is_open", "opens_at", "deadline")
+    list_display = ("title", "is_open", "opens_at", "deadline", "late_whitelist_student_numbers")
+    list_editable = ("is_open", "opens_at", "deadline")
     list_filter = ("is_open",)
+    search_fields = ("title",)
+    fields = (
+        "title",
+        "is_open",
+        "opens_at",
+        "deadline",
+        "allowed_classes",
+        "late_whitelist_student_numbers",
+        "quota_bytes_per_student",
+    )
 
 
 @admin.register(MaterialRequirement)

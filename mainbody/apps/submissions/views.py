@@ -8,8 +8,13 @@ from .services import create_draft, save_draft, submit_for_review
 
 
 def serialize(item):
-    return {"id": item.id, "activity_id": item.activity_id, "status": item.status,
-            "version": item.version, "draft_data": item.draft_data}
+    return {
+        "id": str(item.id),
+        "activity_id": str(item.activity_id),
+        "status": item.status,
+        "version": item.version,
+        "draft_data": item.draft_data,
+    }
 
 
 @endpoint("GET", "POST")
@@ -34,11 +39,38 @@ def detail(request, submission_id):
         item = Submission.objects.get(pk=submission_id, owner=request.user)
     else:
         data = json_body(request)
-        item = save_draft(actor=request.user, submission_id=submission_id,
-                          expected_version=data.get("expected_version"), data=data.get("draft_data"))
+        item = save_draft(
+            actor=request.user,
+            submission_id=submission_id,
+            expected_version=data.get("expected_version"),
+            data=data.get("draft_data"),
+        )
     return JsonResponse(serialize(item))
 
 
 @endpoint("POST")
 def submit(request, submission_id):
-    submit_for_review(actor=request.user, submission_id=submission_id)
+    require_student(request.user)
+    data = {}
+    if request.body:
+        try:
+            data = json_body(request)
+        except DomainError:
+            pass
+    request_key = None
+    if "request_key" in data and data["request_key"]:
+        try:
+            request_key = uuid.UUID(str(data["request_key"]))
+        except ValueError:
+            raise DomainError("request_key 必须为 UUID。") from None
+
+    submission, revision = submit_for_review(actor=request.user, submission_id=submission_id, request_key=request_key)
+    return JsonResponse(
+        {
+            "submission": serialize(submission),
+            "revision_id": str(revision.id),
+            "revision_number": revision.number,
+            "status": submission.status,
+        },
+        status=200,
+    )

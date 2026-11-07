@@ -49,11 +49,9 @@ def test_csrf_remains_enabled(student, activity):
     assert response.status_code == 403
 
 
-def test_unimplemented_routes_do_not_report_success(client, student, activity):
+def test_unimplemented_routes_do_not_report_success(client, student):
     client.force_login(student)
-    draft = create_draft(actor=student, activity_id=activity.pk)
     assert client.post("/api/v1/uploads/init/", {}, content_type="application/json").status_code == 501
-    assert client.post(f"/api/v1/submissions/{draft.pk}/submit/", {}, content_type="application/json").status_code == 501
 
 
 def test_anonymous_api_is_unauthorized(client):

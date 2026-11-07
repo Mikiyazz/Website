@@ -1,23 +1,89 @@
-"""Internal quota example, not yet exposed as a cloud upload endpoint.
+"""Upload services: local streaming storage, quota management, overwrite cleanup, and mandatory material checks.
 
-Lock order: user -> quota -> upload. Use the same order in future finalize/abort.
-Never release cloud-backed reservations until remote abort/completion is confirmed.
+Lock order: user -> quota -> upload.
 """
-import uuid
+import hashlib
+import os
 from datetime import timedelta
+from pathlib import Path
+import uuid
 from django.conf import settings
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 from apps.accounts.models import User
-from apps.accounts.permissions import require_student
+from apps.accounts.permissions import is_college_admin, require_student
 from apps.activities.models import MaterialRequirement
 from apps.activities.selectors import ensure_activity_open
-from apps.common.errors import Conflict, DomainError, QuotaExceeded
-from .models import StorageQuota, UploadSession
-from .policies import validate_metadata
+from apps.audit.services import record
+from apps.common.errors import Conflict, DomainError, Forbidden, QuotaExceeded
+from apps.reviews.models import ReviewAssignment
+from .models import FileAsset, StorageQuota, UploadSession
+from .policies import (
+    EXTENSION_CONTENT_TYPES,
+    INLINE_PREVIEW_EXTENSIONS,
+    SINGLE_FILE_MATERIAL_CODES,
+    STANDARD_MATERIAL_RULES,
+    validate_magic_bytes,
+    validate_metadata,
+    validate_uploaded_file,
+)
 
-ACTIVE_STATES = [UploadSession.Status.RESERVED, UploadSession.Status.UPLOADING,
-                 UploadSession.Status.COMPLETING, UploadSession.Status.ABORTING]
+ACTIVE_STATES = [
+    UploadSession.Status.RESERVED,
+    UploadSession.Status.UPLOADING,
+    UploadSession.Status.COMPLETING,
+    UploadSession.Status.ABORTING,
+]
+
+STREAM_CHUNK_BYTES = 64 * 1024
+
+
+def ensure_standard_material_requirements(activity) -> dict[str, MaterialRequirement]:
+    """Ensure the five standard material requirements are configured on the given activity."""
+    result: dict[str, MaterialRequirement] = {}
+    for code, spec in STANDARD_MATERIAL_RULES.items():
+        req, _ = MaterialRequirement.objects.update_or_create(
+            activity=activity,
+            code=code,
+            defaults={
+                "title": spec["title"],
+                "required": spec["required"],
+                "allowed_extensions": list(spec["allowed_extensions"]),
+                "max_file_bytes": spec["max_file_bytes"],
+                "min_count": spec["min_count"],
+                "max_count": spec["max_count"],
+            },
+        )
+        result[code] = req
+    return result
+
+
+configure_standard_requirements = ensure_standard_material_requirements
+init_standard_requirements = ensure_standard_material_requirements
+
+
+def resolve_file_disk_path(object_key_or_upload) -> Path:
+    """Resolve the absolute local disk path inside settings.MEDIA_ROOT for an UploadSession or object_key."""
+    object_key = (
+        object_key_or_upload.object_key
+        if hasattr(object_key_or_upload, "object_key")
+        else str(object_key_or_upload)
+    )
+    media_root = Path(settings.MEDIA_ROOT).resolve()
+    full_path = (media_root / object_key).resolve()
+    if media_root not in full_path.parents and full_path != media_root:
+        raise DomainError("非法的文件存储路径。")
+    return full_path
+
+
+def _remove_physical_file(object_key: str) -> None:
+    if not object_key:
+        return
+    try:
+        disk_path = resolve_file_disk_path(object_key)
+        os.remove(disk_path)
+    except FileNotFoundError:
+        pass
 
 
 @transaction.atomic
@@ -32,7 +98,11 @@ def reserve_upload(*, actor, requirement_id, filename, declared_bytes, request_k
     require_student(owner)
     existing = UploadSession.objects.filter(owner=owner, request_key=request_key).first()
     if existing:
-        if (str(existing.requirement_id), existing.original_name, existing.declared_bytes) != (str(requirement_id), filename, declared_bytes):
+        if (str(existing.requirement_id), existing.original_name, existing.declared_bytes) != (
+            str(requirement_id),
+            filename,
+            declared_bytes,
+        ):
             raise Conflict("同一幂等键不能用于不同的文件。")
         return existing
     rule = MaterialRequirement.objects.select_related("activity").get(pk=requirement_id)
@@ -42,16 +112,23 @@ def reserve_upload(*, actor, requirement_id, filename, declared_bytes, request_k
         raise Conflict("同时上传任务过多，请先完成或取消已有任务。")
     if UploadSession.objects.filter(owner=owner, requirement=rule).exclude(status=UploadSession.Status.ABORTED).count() >= rule.max_count:
         raise Conflict("此材料类别已达到文件数量限制。")
-    quota, _ = StorageQuota.objects.get_or_create(owner=owner, activity=rule.activity,
-                                                 defaults={"limit_bytes": rule.activity.quota_bytes_per_student})
+    quota, _ = StorageQuota.objects.get_or_create(
+        owner=owner,
+        activity=rule.activity,
+        defaults={"limit_bytes": rule.activity.quota_bytes_per_student},
+    )
     quota = StorageQuota.objects.select_for_update().get(pk=quota.pk)
     if quota.used_bytes + quota.reserved_bytes + declared_bytes > quota.limit_bytes:
         raise QuotaExceeded("该活动的累计存储额度不足。")
     quota.reserved_bytes += declared_bytes
     quota.save(update_fields=["reserved_bytes", "updated_at"])
     return UploadSession.objects.create(
-        owner=owner, requirement=rule, quota=quota, request_key=request_key,
-        original_name=filename, declared_bytes=declared_bytes,
+        owner=owner,
+        requirement=rule,
+        quota=quota,
+        request_key=request_key,
+        original_name=filename,
+        declared_bytes=declared_bytes,
         object_key=f"activities/{rule.activity_id}/{uuid.uuid4().hex}",
         expires_at=timezone.now() + timedelta(days=3),
     )
@@ -74,3 +151,332 @@ def cancel_unstarted_reservation(*, actor, upload_id):
     upload.status = UploadSession.Status.ABORTED
     upload.save(update_fields=["status", "updated_at"])
     return upload
+
+
+@transaction.atomic
+def direct_upload(*, actor, requirement_id, file_obj, replace_upload_id=None, request_key=None):
+    """Stream an uploaded file to MEDIA_ROOT after double hard validation and overwrite/cleanup old files."""
+    require_student(actor)
+    if file_obj is None:
+        raise DomainError("未提供上传文件。")
+
+    if request_key is not None and str(request_key).strip() != "":
+        try:
+            resolved_request_key = uuid.UUID(str(request_key))
+        except ValueError:
+            raise DomainError("request_key 必须为 UUID。") from None
+    else:
+        resolved_request_key = uuid.uuid4()
+
+    try:
+        req_uuid = uuid.UUID(str(requirement_id))
+    except ValueError:
+        raise DomainError("requirement_id 必须为 UUID。") from None
+
+    rule = MaterialRequirement.objects.select_related("activity").get(pk=req_uuid)
+    ensure_activity_open(rule.activity, actor)
+
+    filename, extension, declared_bytes, detected_type = validate_uploaded_file(
+        file_obj,
+        requirement=rule,
+    )
+
+    owner = User.objects.select_for_update().get(pk=actor.pk)
+    require_student(owner)
+
+    from apps.submissions.models import Submission
+
+    existing_sub = Submission.objects.filter(owner=owner, activity=rule.activity).first()
+    if existing_sub and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED):
+        raise Conflict(f"当前申报状态为【{existing_sub.get_status_display()}】，不允许上传或替换材料。")
+
+    quota, _ = StorageQuota.objects.get_or_create(
+        owner=owner,
+        activity=rule.activity,
+        defaults={"limit_bytes": rule.activity.quota_bytes_per_student},
+    )
+    quota = StorageQuota.objects.select_for_update().get(pk=quota.pk)
+
+    active_uploads_qs = (
+        UploadSession.objects.select_for_update()
+        .filter(owner=owner, requirement=rule)
+        .exclude(status=UploadSession.Status.ABORTED)
+        .order_by("created_at")
+    )
+    active_uploads = list(active_uploads_qs)
+
+    is_single_file_rule = rule.max_count == 1 or rule.code in SINGLE_FILE_MATERIAL_CODES
+    uploads_to_replace: list[UploadSession] = []
+
+    if is_single_file_rule:
+        uploads_to_replace = active_uploads
+    elif replace_upload_id is not None and str(replace_upload_id).strip() != "":
+        try:
+            rep_uuid = uuid.UUID(str(replace_upload_id))
+        except ValueError:
+            raise DomainError("replace_upload_id 必须为 UUID。") from None
+        matched = [u for u in active_uploads if u.id == rep_uuid]
+        if not matched:
+            raise UploadSession.DoesNotExist("待替换的原文件记录不存在。")
+        uploads_to_replace = matched
+    else:
+        if len(active_uploads) >= rule.max_count:
+            raise Conflict(f"此材料类别已达到文件数量上限（最多 {rule.max_count} 份）。")
+
+    release_used_bytes = 0
+    release_reserved_bytes = 0
+    old_assets_by_upload_id: dict[uuid.UUID, FileAsset] = {}
+    if uploads_to_replace:
+        for asset in FileAsset.objects.select_for_update().filter(upload__in=uploads_to_replace):
+            old_assets_by_upload_id[asset.upload_id] = asset
+        for old_up in uploads_to_replace:
+            if old_up.status == UploadSession.Status.COMPLETE:
+                old_asset = old_assets_by_upload_id.get(old_up.id)
+                release_used_bytes += old_asset.actual_bytes if old_asset is not None else old_up.declared_bytes
+            else:
+                release_reserved_bytes += old_up.declared_bytes
+
+    projected_used = max(0, quota.used_bytes - release_used_bytes) + declared_bytes
+    projected_reserved = max(0, quota.reserved_bytes - release_reserved_bytes)
+    if projected_used + projected_reserved > quota.limit_bytes:
+        raise QuotaExceeded("该活动的累计存储额度不足。")
+
+    object_key = f"activities/{rule.activity_id}/{owner.username}/{rule.code}/{uuid.uuid4().hex}{extension}"
+    disk_path = resolve_file_disk_path(object_key)
+    disk_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hasher = hashlib.sha256()
+    written_bytes = 0
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+
+    try:
+        with open(disk_path, "wb") as dst:
+            if hasattr(file_obj, "chunks"):
+                for chunk in file_obj.chunks(chunk_size=STREAM_CHUNK_BYTES):
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    dst.write(chunk)
+                    hasher.update(chunk)
+                    written_bytes += len(chunk)
+            else:
+                while True:
+                    chunk = file_obj.read(STREAM_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    dst.write(chunk)
+                    hasher.update(chunk)
+                    written_bytes += len(chunk)
+    except Exception:
+        _remove_physical_file(object_key)
+        raise
+
+    max_allowed = min(settings.MAX_FILE_BYTES, rule.max_file_bytes)
+    spec = STANDARD_MATERIAL_RULES.get(rule.code)
+    if spec:
+        max_allowed = min(max_allowed, spec["max_file_bytes"])
+
+    if written_bytes <= 0 or written_bytes > max_allowed:
+        _remove_physical_file(object_key)
+        raise DomainError("文件实际写入字节数超出材料类别允许范围。")
+
+    replaced_ids: list[uuid.UUID] = []
+    old_object_keys_to_delete: list[str] = []
+    for old_up in uploads_to_replace:
+        old_up.status = UploadSession.Status.ABORTED
+        old_up.save(update_fields=["status", "updated_at"])
+        old_asset = old_assets_by_upload_id.get(old_up.id)
+        if old_asset is not None and old_asset.status != FileAsset.Status.INVALID:
+            old_asset.status = FileAsset.Status.INVALID
+            old_asset.save(update_fields=["status", "updated_at"])
+        replaced_ids.append(old_up.id)
+        old_object_keys_to_delete.append(old_up.object_key)
+
+    quota.used_bytes = max(0, quota.used_bytes - release_used_bytes) + written_bytes
+    quota.reserved_bytes = projected_reserved
+    quota.save(update_fields=["used_bytes", "reserved_bytes", "updated_at"])
+
+    upload_session = UploadSession.objects.create(
+        owner=owner,
+        requirement=rule,
+        quota=quota,
+        request_key=resolved_request_key,
+        object_key=object_key,
+        original_name=filename,
+        declared_bytes=written_bytes,
+        status=UploadSession.Status.COMPLETE,
+        expires_at=timezone.now() + timedelta(days=365),
+    )
+
+    file_asset = FileAsset.objects.create(
+        upload=upload_session,
+        actual_bytes=written_bytes,
+        detected_type=detected_type,
+        checksum_algorithm="sha256",
+        checksum_value=hasher.hexdigest(),
+        status=FileAsset.Status.VALID,
+    )
+
+    for old_key in old_object_keys_to_delete:
+        _remove_physical_file(old_key)
+
+    record(
+        actor=owner,
+        action="upload.direct_completed",
+        target=upload_session,
+        metadata={
+            "requirement_code": rule.code,
+            "original_name": filename,
+            "actual_bytes": written_bytes,
+            "replaced_upload_ids": [str(uid) for uid in replaced_ids],
+        },
+    )
+    return upload_session, file_asset, replaced_ids
+
+
+@transaction.atomic
+def delete_uploaded_file(*, actor, upload_id):
+    """Explicitly delete an uploaded attachment, release quota, and physically remove the file from disk."""
+    require_student(actor)
+    owner = User.objects.select_for_update().get(pk=actor.pk)
+    upload = UploadSession.objects.select_related("requirement__activity").select_for_update().get(
+        pk=upload_id,
+        owner=owner,
+    )
+    ensure_activity_open(upload.requirement.activity, owner)
+
+    from apps.submissions.models import Submission
+
+    existing_sub = Submission.objects.filter(owner=owner, activity=upload.requirement.activity).first()
+    if existing_sub and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED):
+        raise Conflict(f"当前申报状态为【{existing_sub.get_status_display()}】，不允许删除材料。")
+
+    quota = StorageQuota.objects.select_for_update().get(pk=upload.quota_id)
+    asset = FileAsset.objects.select_for_update().filter(upload=upload).first()
+
+    if upload.status != UploadSession.Status.ABORTED:
+        if upload.status == UploadSession.Status.COMPLETE:
+            bytes_to_release = asset.actual_bytes if asset is not None else upload.declared_bytes
+            quota.used_bytes = max(0, quota.used_bytes - bytes_to_release)
+        else:
+            quota.reserved_bytes = max(0, quota.reserved_bytes - upload.declared_bytes)
+        quota.save(update_fields=["used_bytes", "reserved_bytes", "updated_at"])
+        upload.status = UploadSession.Status.ABORTED
+        upload.save(update_fields=["status", "updated_at"])
+
+    if asset is not None and asset.status != FileAsset.Status.INVALID:
+        asset.status = FileAsset.Status.INVALID
+        asset.save(update_fields=["status", "updated_at"])
+
+    _remove_physical_file(upload.object_key)
+    return upload
+
+
+def validate_required_materials(*, actor, activity) -> None:
+    """Verify all mandatory materials (application_form=1, practice_report=1, scene_photos=3..5) are validly uploaded."""
+    valid_uploads = list(
+        UploadSession.objects.select_related("requirement", "fileasset").filter(
+            owner=actor,
+            requirement__activity=activity,
+            status=UploadSession.Status.COMPLETE,
+            fileasset__status=FileAsset.Status.VALID,
+        )
+    )
+    counts_by_code: dict[str, int] = {}
+    for up in valid_uploads:
+        disk_path = resolve_file_disk_path(up.object_key)
+        if not disk_path.exists():
+            continue
+        code = up.requirement.code
+        counts_by_code[code] = counts_by_code.get(code, 0) + 1
+
+    # Hard check on the 3 mandatory standard categories:
+    # 1) 申报表 (application_form): 1份
+    app_form_count = counts_by_code.get("application_form", 0)
+    if app_form_count != 1:
+        raise DomainError(f"必交材料【申报表（application_form）】需上传 1 份 .docx 文件（当前有效份数：{app_form_count}）。")
+
+    # 2) 实践报告 (practice_report): 1份
+    report_count = counts_by_code.get("practice_report", 0)
+    if report_count != 1:
+        raise DomainError(f"必交材料【实践报告（practice_report）】需上传 1 份 .pdf 文件（当前有效份数：{report_count}）。")
+
+    # 3) 现场照片 (scene_photos): 3~5张
+    photo_count = counts_by_code.get("scene_photos", 0)
+    if not (3 <= photo_count <= 5):
+        raise DomainError(f"必交材料【现场照片（scene_photos）】需上传 3～5 张图片（当前有效张数：{photo_count}）。")
+
+    # Also check any additional required MaterialRequirement rows configured on the activity
+    for req in MaterialRequirement.objects.filter(activity=activity, required=True):
+        c = counts_by_code.get(req.code, 0)
+        min_required = max(1, req.min_count)
+        if not (min_required <= c <= req.max_count):
+            raise DomainError(
+                f"必交材料【{req.title}（{req.code}）】上传数量不符合要求（需 {min_required}～{req.max_count} 份，当前：{c} 份）。"
+            )
+
+
+def get_accessible_upload_for_user(*, actor, upload_or_asset_id) -> tuple[UploadSession, FileAsset, Path]:
+    """Verify user permission (owner, activity reviewer, or college_admin) and return (UploadSession, FileAsset, Path)."""
+    if not actor.is_authenticated or not actor.is_active:
+        raise Forbidden("请先登录。")
+
+    try:
+        target_uuid = uuid.UUID(str(upload_or_asset_id))
+    except ValueError:
+        raise DomainError("文件 ID 必须为有效 UUID。") from None
+
+    upload = (
+        UploadSession.objects.select_related("requirement__activity", "owner", "fileasset")
+        .filter(pk=target_uuid)
+        .first()
+    )
+    if upload is None:
+        asset_match = (
+            FileAsset.objects.select_related("upload__requirement__activity", "upload__owner")
+            .filter(pk=target_uuid)
+            .first()
+        )
+        if asset_match is not None:
+            upload = asset_match.upload
+
+    if upload is None:
+        raise UploadSession.DoesNotExist("文件不存在。")
+
+    # Permission check: owner, reviewer for this activity, or college admin
+    has_access = False
+    if upload.owner_id == actor.id:
+        has_access = True
+    elif is_college_admin(actor):
+        has_access = True
+    elif actor.role == User.Role.REVIEWER:
+        activity_id = upload.requirement.activity_id
+        owner_class = upload.owner.class_name
+        assigned_classes = list(
+            ReviewAssignment.objects.filter(reviewer=actor, activity_id=activity_id).values_list("class_name", flat=True)
+        )
+        if not assigned_classes or "" in assigned_classes:
+            has_access = True
+        elif owner_class:
+            allowed_set = {c.strip() for c in assigned_classes if c and c.strip()}
+            has_access = owner_class in allowed_set
+        else:
+            has_access = False
+
+    if not has_access:
+        raise Forbidden("无权访问此文件。")
+
+    if upload.status != UploadSession.Status.COMPLETE:
+        raise UploadSession.DoesNotExist("该文件已被覆盖或作废。")
+
+    asset = getattr(upload, "fileasset", None) or FileAsset.objects.filter(upload=upload).first()
+    if asset is None or asset.status != FileAsset.Status.VALID:
+        raise UploadSession.DoesNotExist("该文件未通过校验或已失效。")
+
+    disk_path = resolve_file_disk_path(upload.object_key)
+    if not disk_path.exists():
+        raise UploadSession.DoesNotExist("文件在磁盘上不存在。")
+
+    return upload, asset, disk_path

@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}申报审核详情 · {{ item.project_name|default:item.student_number }}{% endblock %}
+{% block content %}
+<p class="eyebrow">社会实践审核中心 · 申报详情</p>
+<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+  <h1>{{ item.project_name|default:"（未命名项目）" }}</h1>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <span class="badge badge-{{ item.status }}" style="font-size:14px; padding:5px 14px;">{{ item.status_display }}</span>
+    <a class="btn quiet btn-sm" href="/?activity_id={{ item.activity_id }}">← 返回审核列表</a>
+  </div>
+</div>
+
+<!-- 1. 申报人与项目基础信息 -->
+<section class="card">
+  <h2>项目与申报人信息</h2>
+  <div class="grid">
+    <div>
+      <p><strong>学号：</strong>{{ item.student_number }}</p>
+      <p><strong>姓名：</strong>{{ item.real_name|default:"-" }}</p>
+      <p><strong>年级 / 专业：</strong>{{ item.grade|default:"-" }} / {{ item.major|default:"-" }}</p>
+      <p><strong>班级：</strong>{{ item.class_name }}</p>
+      <p><strong>手机号：</strong>{{ item.phone|default:"-" }}</p>
+    </div>
+    <div>
+      <p><strong>所属活动：</strong>{{ submission.activity.title }}</p>
+      <p><strong>项目名称：</strong>{{ item.project_name|default:"-" }}</p>
+      <p><strong>项目类别：</strong>{{ item.category|default:"-" }}</p>
+      <p><strong>申报形式：</strong>{{ item.declaration_type_display }}</p>
+      <p><strong>更新时间：</strong>{{ submission.updated_at|date:"Y-m-d H:i" }}</p>
+    </div>
+  </div>
+
+  {% if item.team_members %}
+  <div style="margin-top:16px;">
+    <h3>团队成员列表（共 {{ item.team_members|length }} 名队员）</h3>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>队员学号</th>
+            <th>队员姓名</th>
+            <th>队员班级</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for tm in item.team_members %}
+          <tr>
+            <td>{{ tm.student_number }}</td>
+            <td>{{ tm.real_name }}</td>
+            <td>{{ tm.class_name }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+<!-- 2. 全部附件列表：PDF/图片提供浏览器新窗口在线预览，Word/视频提供下载查看 -->
+<section class="card" id="review-attachments-section">
+  <h2>全部附件列表（{{ item.attachments|length }} 份）</h2>
+  <ul class="uploaded-file-list">
+    {% for att in item.attachments %}
+    <li class="uploaded-file-item">
+      <div>
+        <span class="badge badge-optional">{{ att.requirement_title }}</span>
+        <strong style="margin-left:8px;">{{ att.original_name }}</strong>
+        <span style="font-size:12px; color:#536777; margin-left:6px;">（{{ att.extension }}）</span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        {% if att.can_inline_preview %}
+        <a class="btn btn-sm preview-online-btn"
+           href="{{ att.preview_url }}"
+           target="_blank"
+           rel="noopener">
+          🔍 浏览器新窗口在线预览
+        </a>
+        <a class="btn btn-sm quiet" href="{{ att.download_url }}">下载文件</a>
+        {% else %}
+        <a class="btn btn-sm quiet download-only-btn" href="{{ att.download_url }}">⬇️ 下载查看</a>
+        {% endif %}
+      </div>
+    </li>
+    {% empty %}
+    <li style="color:#6c7f8e; padding:12px 0;">该申报暂未上传有效附件。</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<!-- 3. 审核操作区 -->
+<section class="card" id="review-action-section">
+  <h2>审核操作区</h2>
+  {% if item.can_first_review or item.can_final_review %}
+  <form method="post"
+        action="{% url 'review-submission-action' item.id %}"
+        id="detail-review-form"
+        onsubmit="return validateDetailReviewForm(this)">
+    {% csrf_token %}
+    <input type="hidden" name="activity_id" value="{{ item.activity_id }}">
+    <input type="hidden" name="next" value="{% url 'review-submission-detail' item.id %}">
+    <input type="hidden" name="decision" id="detail_decision_input" value="approved">
+
+    <div class="form-row">
+      <label for="detail_comment_textarea">
+        审核意见（点击“打回修改”时<strong>必须填写打回意见</strong>，为空严禁提交）
+      </label>
+      <textarea name="comment"
+                id="detail_comment_textarea"
+                rows="3"
+                placeholder="请填写审核意见；若打回修改，请写明具体问题及修改要求..."></textarea>
+    </div>
+
+    <div class="action-bar">
+      {% if item.can_first_review %}
+      <button type="submit"
+              class="btn btn-success"
+              onclick="document.getElementById('detail_decision_input').value='approved'">
+        ✅ 初审通过
+      </button>
+      <button type="submit"
+              class="btn btn-danger"
+              onclick="document.getElementById('detail_decision_input').value='returned'">
+        ↩️ 打回修改
+      </button>
+      {% elif item.can_final_review %}
+      <button type="submit"
+              class="btn btn-success"
+              onclick="document.getElementById('detail_decision_input').value='approved'">
+        🏆 终审通过
+      </button>
+      <button type="submit"
+              class="btn btn-danger"
+              onclick="document.getElementById('detail_decision_input').value='returned'">
+        ↩️ 打回修改
+      </button>
+      {% endif %}
+    </div>
+  </form>
+  {% else %}
+  <p>当前申报状态为【{{ item.status_display }}】，不在当前账号的可执行审核阶段。</p>
+  {% endif %}
+</section>
+
+<!-- 4. 审核历史记录 -->
+<section class="card">
+  <h2>历史审核记录</h2>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>阶段</th>
+          <th>结论</th>
+          <th>审核意见</th>
+          <th>审核人</th>
+          <th>时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rec in item.review_records %}
+        <tr>
+          <td>{{ rec.stage_display }}</td>
+          <td>
+            <span class="badge {% if rec.decision == 'approved' %}badge-final_approved{% else %}badge-returned{% endif %}">
+              {{ rec.decision_display }}
+            </span>
+          </td>
+          <td>{{ rec.comment|default:"（无附加意见）" }}</td>
+          <td>{{ rec.reviewer_name }}</td>
+          <td>{{ rec.created_at }}</td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="5" style="color:#6c7f8e;">暂无历史审核记录。</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+function validateDetailReviewForm(formEl) {
+  var decInput = document.getElementById("detail_decision_input");
+  var commentEl = document.getElementById("detail_comment_textarea");
+  var decision = decInput ? decInput.value : "approved";
+  var comment = commentEl ? commentEl.value.trim() : "";
+  if (decision === "returned" && !comment) {
+    window.alert("打回修改时必须填写打回意见，原因不能为空！");
+    if (commentEl) commentEl.focus();
+    return false;
+  }
+  return true;
+}
+</script>
+{% endblock %}
