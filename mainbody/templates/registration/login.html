@@ -1,6 +1,16 @@
 {% extends "base.html" %}
 {% block title %}账号登录 · 学院社会实践材料平台{% endblock %}
 {% block content %}
+jiangxinru-register
+<section class="card narrow"><p class="eyebrow">学院社会实践</p><h1>登录材料平台</h1>
+<p>请使用管理员分配的账号登录。</p>
+<form method="post">{% csrf_token %}{{ form.as_p }}
+<input type="hidden" name="next" value="{{ next }}"><button type="submit">登录</button></form>
+<div style="text-align: center; margin-top: 20px; font-size: 14px;">
+    <a href="register.html" style="color: #409eff; text-decoration: none;">还没有账号？点击这里用学号注册</a>
+</div>
+</section>{% endblock %}
+
 <section class="card narrow">
   <p class="eyebrow">学院社会实践</p>
   <h1>登录材料平台</h1>
@@ -38,3 +48,4 @@
   </p>
 </section>
 {% endblock %}
+main
