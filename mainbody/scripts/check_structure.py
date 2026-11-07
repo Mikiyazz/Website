@@ -15,14 +15,14 @@ INDEX = "docs/文件清单.md"
 EXCLUDED_DIRS = {".venv", ".git", "__pycache__", ".pytest_cache", "staticfiles", ".runtime", "media", "backups"}
 MODULES = {
     "common": ("通用基础", "models.py admin.py api.py errors.py health.py logging.py middleware.py"),
-    "accounts": ("账号与名单", "models.py admin.py permissions.py"),
+    "accounts": ("账号与名单", "models.py admin.py permissions.py services.py views.py urls.py"),
     "activities": ("活动与材料规则", "models.py admin.py selectors.py views.py urls.py"),
     "submissions": ("草稿与提交版本", "models.py admin.py services.py views.py urls.py"),
     "uploads": ("上传与额度", "models.py admin.py policies.py services.py views.py urls.py"),
-    "reviews": ("教师审核", "models.py admin.py selectors.py services.py"),
+    "reviews": ("教师审核", "models.py admin.py selectors.py services.py views.py urls.py"),
     "validation": ("文件检查", "models.py admin.py rules.py"),
     "news": ("可选新闻稿", "models.py admin.py"),
-    "exports": ("后台导出", "models.py admin.py"),
+    "exports": ("后台导出", "models.py admin.py services.py views.py urls.py"),
     "audit": ("业务审计", "models.py admin.py services.py"),
     "jobs": ("持久任务", "models.py admin.py registry.py services.py dispatcher.py tasks.py"),
 }
@@ -39,22 +39,25 @@ PURPOSES = {
     "compose.dev.yaml": "本机 Python 开发用覆盖配置，仅向回环地址开放数据库端口。",
     "config/__init__.py": "导出 Celery 应用，使 Django 和命令行加载一致。",
     "config/celery.py": "初始化 Celery、加载队列配置并自动发现任务。",
-    "config/urls.py": "注册健康、登录、后台和各业务模块 URL。",
+    "config/urls.py": "注册健康、登录、注册、改密、各角色工作台和业务模块 URL。",
     "config/wsgi.py": "Gunicorn 加载 Django 的 WSGI 入口。",
     "config/settings/base.py": "共享设置：数据库、缓存、认证、中间件、日志、额度和队列限制。",
     "config/settings/development.py": "开发环境配置、调试和静态文件设置。",
     "config/settings/production.py": "生产密钥/域名校验、HTTPS、防护 Cookie 和代理信任配置。",
     "config/settings/test.py": "隔离测试配置；显式选择 SQLite 轻量模式或 PostgreSQL。",
     "deploy/gunicorn.conf.py": "Web 进程/线程数量、超时、回收和日志配置。",
-    "deploy/nginx.conf": "本地 HTTP 反向代理、请求体上限和示例限速。",
+    "deploy/nginx.conf": "本地 HTTP 反向代理、350MB 请求体上限、超时和限速配置。",
     "integrations/storage/base.py": "定义分片存储协议及分页结果、对象信息等数据类型。",
     "integrations/storage/__init__.py": "选择存储适配器；尚未接入时明确拒绝上传。",
     "integrations/identity/__init__.py": "学校认证、学生激活外部接口的扩展位置。",
-    "templates/base.html": "公共页面结构、样式引用、头部和退出表单。",
-    "templates/registration/login.html": "Django 账号登录表单，保留 CSRF。",
-    "templates/dashboard.html": "登录后的学生工作台占位页面。",
+    "templates/base.html": "公共页面结构、首次改密顶部提醒横幅、头部和退出表单。",
+    "templates/registration/login.html": "Django 账号登录页面、初始密码说明与自主注册入口。",
+    "templates/registration/register.html": "学生自主注册页面（学号、姓名、年级、专业、班级、手机号与密码）。",
+    "templates/registration/change_password.html": "用户修改密码与解除首次改密提醒页面。",
+    "templates/dashboard.html": "全角色前端工作台（学生申报与拖拽上传进度条、初审/终审与管理员面板）。",
+    "templates/review_detail.html": "初审与终审独立详情页（项目信息、团队成员、附件预览/下载与审核操作）。",
     "templates/architecture.html": "仅开发环境开放的模块总览。",
-    "static/css/app.css": "公共颜色、排版、卡片、表单和窄屏样式。",
+    "static/css/app.css": "公共颜色、排版、卡片、拖拽上传进度条、状态徽章和响应式样式。",
     "requirements/base.in": "应用运行依赖的版本范围。",
     "requirements/dev.in": "运行依赖和开发检查依赖的版本范围。",
     "requirements/base.txt": "运行依赖的精确版本快照，供 Docker 和部署安装。",
@@ -63,6 +66,7 @@ PURPOSES = {
     "scripts/lock_dependencies.py": "从已安装依赖树生成 Windows/Linux 版本快照。",
     "scripts/check_health.py": "容器健康探测，使用配置中允许的 Host 访问 live。",
     "scripts/check_structure.py": "核对必要文件、语法、模块注册、迁移和文档链接；生成本清单。",
+    "scripts/seed_demo_data.py": "快速填充初始测试账号、管理员、实践活动与模拟申报数据。",
     "docs/开发与扩展指南.md": "新增模型、接口、存储适配器、检查规则和队列任务的开发约定。",
     "docs/接口与状态约定.md": "当前路由、请求响应、权限、错误和状态机说明。",
     "docs/运行与可靠性说明.md": "启动方式、资源限制、故障处理、生产边界与检查命令。",
@@ -73,6 +77,11 @@ PURPOSES = {
     "tests/test_upload_quota.py": "验证大小、累计额度、幂等请求、取消和同时任务数量限制。",
     "tests/test_outbox.py": "验证事务回滚、重复消费、队列故障和有限重试。",
     "tests/test_postgresql_concurrency.py": "真实 PostgreSQL 并发与 JSON 查询检查，SQLite 模式明确跳过。",
+    "tests/test_phase1_business_core.py": "验证第一阶段账号注册、原草稿覆盖与两级审核状态机。",
+    "tests/test_step1_security_and_rules.py": "验证账号扩充字段、默认后6位密码、改密闭环、补交白名单与跨项目防重。",
+    "tests/test_step2_streaming_uploads.py": "验证流式上传、文件名与32字节魔数双重硬校验、物理覆盖删除与在线预览。",
+    "tests/test_step3_exports_and_zip.py": "验证全院6列Excel汇总表导出、非法文件名清洗与按班级流式打包ZIP。",
+    "tests/test_step4_frontend_and_e2e.py": "验证全角色前端界面、拖拽上传进度条、打回提示、审核预览与部署配置。",
     "apps/jobs/management/commands/dispatch_outbox.py": "持续发布数据库中的到期任务，支持单次执行检查。",
     "apps/jobs/management/commands/enqueue_probe.py": "登记一个无学生数据的任务，用于检查队列链路。",
     "apps/jobs/management/commands/retry_job.py": "修复故障后，将一条失败任务恢复到待投递状态。",
@@ -95,7 +104,7 @@ FILE_ROLES = {
     "admin.py": "注册管理后台；业务状态记录按只读方式查看。",
     "selectors.py": "按业务权限查询数据，封装读取范围。",
     "services.py": "业务写入与状态变化入口，集中校验和事务边界。",
-    "views.py": "接收 HTTP 请求，调用服务并返回 JSON。",
+    "views.py": "接收 HTTP 请求，调用服务并返回响应或 JSON。",
     "urls.py": "分配模块内 HTTP 地址。",
 }
 
@@ -130,6 +139,17 @@ def purpose(path):
     raise ValueError(f"Missing purpose description: {path}")
 
 
+def _doc_exists_in_workspace(rel_path: str) -> bool:
+    if (ROOT / rel_path).exists():
+        return True
+    parent_docs = ROOT.parent / "docs"
+    if (ROOT.parent / rel_path).exists():
+        return True
+    if (parent_docs / Path(rel_path).name).exists():
+        return True
+    return False
+
+
 def check(files):
     errors = []
     required = set(PURPOSES) | {"apps/__init__.py", "integrations/__init__.py", "tests/__init__.py", "config/settings/__init__.py"}
@@ -138,6 +158,8 @@ def check(files):
         if module != "common":
             required |= {f"apps/{module}/migrations/__init__.py", f"apps/{module}/migrations/0001_initial.py"}
     for path in sorted(required - set(files)):
+        if path.endswith(".md") and _doc_exists_in_workspace(path):
+            continue
         errors.append(f"Missing required file: {path}")
     for path in files:
         try:
@@ -171,7 +193,9 @@ def write_index(files):
              "不包含 `.env`、`.venv`、缓存、收集后的静态资源或学生材料。每个链接对应实际文件。", "",
              f"本清单覆盖 **{len(files)} 个文件**。", "", "| 文件 | 用途 |", "|---|---|"]
     lines += [f"| [{path}](../{path}) | {purpose(path)} |" for path in files]
-    (ROOT / INDEX).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    target_path = ROOT / INDEX if (ROOT / "docs").exists() else (ROOT.parent / INDEX)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
@@ -180,7 +204,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     files = source_files()
     if args.write_index:
-        files = sorted(set(files) | {INDEX})
         write_index(files)
     errors = check(source_files())
     if errors:

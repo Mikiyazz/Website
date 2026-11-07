@@ -1,9 +1,57 @@
 {% load static %}
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}学院社会实践材料平台{% endblock %}</title>
-<link rel="stylesheet" href="{% static 'css/app.css' %}"></head>
-<body><header><span class="mark">实</span><strong>学院社会实践材料平台</strong>
-{% if user.is_authenticated %}<form action="{% url 'logout' %}" method="post">{% csrf_token %}<button class="quiet" type="submit">退出登录</button></form>{% endif %}
-</header><main>{% block content %}{% endblock %}</main></body></html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}学院社会实践材料平台{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body>
+  <header>
+    <span class="mark">实</span>
+    <a class="brand-link" href="{% url 'dashboard' %}">学院社会实践材料平台</a>
+    {% if user.is_authenticated %}
+    <div class="header-right">
+      <span class="user-pill">
+        {{ user.real_name|default:user.username }}（{{ user.username }}）
+        {% if user.class_name %}· {{ user.class_name }}{% endif %}
+        · {{ user.get_role_display }}
+      </span>
+      <a class="btn btn-sm quiet" href="{% url 'password-change-page' %}">修改密码</a>
+      {% if user.is_staff %}
+      <a class="btn btn-sm quiet" href="/admin/">管理后台</a>
+      {% endif %}
+      <form action="{% url 'logout' %}" method="post" style="margin:0;">
+        {% csrf_token %}
+        <button class="quiet btn-sm" type="submit">退出登录</button>
+      </form>
+    </div>
+    {% endif %}
+  </header>
+
+  <main>
+    {% if user.is_authenticated and user.must_change_password %}
+    <div id="must-change-password-banner" class="alert-banner alert-must-change-pwd" role="alert" data-must-change-password="true">
+      <div>
+        <strong>⚠️ 首次登录改密提醒：</strong>
+        您当前正在使用默认初始密码（must_change_password），为保障社会实践申报材料安全，请立即修改登录密码！
+      </div>
+      <a class="btn btn-sm" href="{% url 'password-change-page' %}">立即前往修改密码</a>
+    </div>
+    {% endif %}
+
+    {% if messages %}
+    <div class="messages-container">
+      {% for message in messages %}
+      <div class="{% if message.tags == 'error' %}alert-error{% else %}alert-success{% endif %}" role="status">
+        {{ message }}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

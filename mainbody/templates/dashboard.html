@@ -1,7 +1,1187 @@
 {% extends "base.html" %}
+{% block title %}
+  {% if workbench_role == "student" %}学生材料申报工作台{% elif is_college_admin %}学院管理员与终审工作台{% else %}团支书初审工作台{% endif %} · 学院社会实践材料平台
+{% endblock %}
 {% block content %}
-<p class="eyebrow">学院社会实践</p><h1>材料提交工作台</h1>
-<p class="lead">{{ user.real_name|default:user.username }}，你好。</p>
-<section class="card"><h2>平台正在建设中</h2><p>活动与材料提交页面尚未开放。开放后，你可以在这里查看活动、提交申请表和实践成果。</p></section>
-{% if user.is_staff %}<p><a href="/admin/">进入管理后台</a></p>{% endif %}
+
+{% if workbench_role == "student" %}
+  <!-- ================================================================== -->
+  <!-- 学生端：社会实践申报与拖拽上传工作台                               -->
+  <!-- ================================================================== -->
+  <p class="eyebrow">学院社会实践 · 学生端工作台</p>
+  <h1>社会实践项目申报与材料上传</h1>
+  <p class="lead">
+    欢迎你，<strong>{{ user.real_name|default:user.username }}</strong>
+    （学号：{{ user.username }}
+    {% if user.grade %} · {{ user.grade }}{% endif %}
+    {% if user.major %} · {{ user.major }}{% endif %}
+    {% if user.class_name %} · {{ user.class_name }}{% endif %}）。
+  </p>
+
+  <!-- 1. 活动列表与当前审核状态徽章 -->
+  <section class="card">
+    <h2>开放申报的社会实践活动列表</h2>
+    {% if activity_cards %}
+    <div class="activity-list">
+      {% for card in activity_cards %}
+      <a class="activity-item {% if card.is_selected %}active{% endif %}"
+         href="?activity_id={{ card.activity.id }}"
+         data-activity-id="{{ card.activity.id }}">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+          <strong>{{ card.activity.title }}</strong>
+          <span class="badge badge-{{ card.status_code }}" data-status-badge="{{ card.status_code }}">{{ card.status_display }}</span>
+        </div>
+        <p style="font-size:13px; margin:8px 0 4px;">
+          开放时间：{{ card.activity.opens_at|date:"Y-m-d H:i" }}<br>
+          截止时间：{{ card.activity.deadline|date:"Y-m-d H:i" }}
+        </p>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+          <span style="font-size:12px; color:#28798c; font-weight:600;">{{ card.window_label }}</span>
+          {% if card.in_whitelist %}
+          <span class="badge badge-whitelist">本人已在补交白名单内</span>
+          {% endif %}
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p>当前暂无开放的社会实践活动。如需补交材料，请联系学院管理员添加学号至补交白名单。</p>
+    {% endif %}
+  </section>
+
+  {% if selected_activity %}
+    <!-- 2. 当状态为“打回修改（returned）”时：顶部醒目红色提示框展示打回意见原文 -->
+    {% if is_returned %}
+    <div id="returned-alert-banner" class="alert-returned" role="alert" data-status="returned">
+      <h3>⚠️ 您的申报材料已被【打回修改】</h3>
+      {% if latest_returned_record %}
+      <p style="color:#841c1c; margin:4px 0;">
+        打回阶段：<strong>{{ latest_returned_record.get_stage_display }}</strong> ·
+        审核人：<strong>{{ latest_returned_record.reviewer.real_name|default:latest_returned_record.reviewer.username }}</strong> ·
+        时间：{{ latest_returned_record.created_at|date:"Y-m-d H:i" }}
+      </p>
+      <div class="returned-comment-box" id="returned-comment-content">{{ latest_returned_record.comment }}</div>
+      {% else %}
+      <div class="returned-comment-box" id="returned-comment-content">请核对材料规范后修改重交。</div>
+      {% endif %}
+      <p style="color:#841c1c; margin:6px 0 0; font-size:14px;">
+        请在下方<strong>原草稿</strong>上直接修改项目信息或重新上传覆盖附件，修改无误后再次点击底部【正式提交审核】按钮。
+      </p>
+    </div>
+    {% endif %}
+
+    <!-- 3. 当状态为待初审、待终审、终审通过或活动已关闭时：只读锁定提示 -->
+    {% if is_locked %}
+    <div id="readonly-lock-banner" class="alert-locked" role="status" data-readonly-locked="true">
+      <strong>🔒 只读锁定状态：</strong>{{ lock_reason }}
+    </div>
+    {% endif %}
+
+    <!-- 4. 项目基本申报信息与个人/团队动态切换表单 -->
+    <section class="card" id="declaration-form-section">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
+        <h2 style="margin:0;">项目申报表单 · {{ selected_activity.title }}</h2>
+        <div>
+          当前审核状态：
+          <span id="current-submission-status-badge" class="badge badge-{{ status_code }}">{{ status_display }}</span>
+        </div>
+      </div>
+
+      <div id="form-feedback-banner" style="display:none;"></div>
+
+      <form id="student-declaration-form" method="post" action="{% url 'student-save-draft' %}" {% if is_locked %}data-form-locked="true"{% endif %}>
+        {% csrf_token %}
+        <input type="hidden" name="activity_id" id="input_activity_id" value="{{ selected_activity.id }}">
+        <input type="hidden" name="submission_id" id="input_submission_id" value="{{ submission.id|default:'' }}">
+        <input type="hidden" name="expected_version" id="input_expected_version" value="{{ submission.version|default:0 }}">
+
+        <div class="grid">
+          <div class="form-row">
+            <label for="input_project_name">社会实践项目名称 <span style="color:#c92a2a;">*</span></label>
+            <input type="text"
+                   name="project_name"
+                   id="input_project_name"
+                   required
+                   placeholder="请输入项目完整名称"
+                   value="{{ draft_data.project_name }}"
+                   {% if is_locked %}disabled readonly{% endif %}>
+          </div>
+          <div class="form-row">
+            <label for="input_category">项目类别 <span style="color:#c92a2a;">*</span></label>
+            <select name="category" id="input_category" {% if is_locked %}disabled{% endif %}>
+              <option value="社会调查" {% if draft_data.category == "社会调查" %}selected{% endif %}>社会调查</option>
+              <option value="红色寻访" {% if draft_data.category == "红色寻访" %}selected{% endif %}>红色寻访</option>
+              <option value="科普宣讲" {% if draft_data.category == "科普宣讲" %}selected{% endif %}>科普宣讲</option>
+              <option value="乡村振兴" {% if draft_data.category == "乡村振兴" %}selected{% endif %}>乡村振兴</option>
+              <option value="科技发明制作" {% if draft_data.category == "科技发明制作" %}selected{% endif %}>科技发明制作</option>
+              <option value="文化传承" {% if draft_data.category == "文化传承" %}selected{% endif %}>文化传承</option>
+              <option value="志愿服务" {% if draft_data.category == "志愿服务" %}selected{% endif %}>志愿服务</option>
+              <option value="学术论文" {% if draft_data.category == "学术论文" %}selected{% endif %}>学术论文</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label>申报形式（个人申报 / 团队申报） <span style="color:#c92a2a;">*</span></label>
+          <div style="display:flex; gap:24px; align-items:center; margin-top:6px;">
+            <label style="display:inline-flex; align-items:center; gap:6px; font-weight:500; cursor:pointer;">
+              <input type="radio"
+                     name="declaration_type"
+                     id="radio_decl_individual"
+                     value="individual"
+                     style="width:auto; margin:0;"
+                     {% if draft_data.declaration_type != "team" %}checked{% endif %}
+                     {% if is_locked %}disabled{% endif %}
+                     onchange="toggleDeclarationType('individual')">
+              个人申报
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:6px; font-weight:500; cursor:pointer;">
+              <input type="radio"
+                     name="declaration_type"
+                     id="radio_decl_team"
+                     value="team"
+                     style="width:auto; margin:0;"
+                     {% if draft_data.declaration_type == "team" %}checked{% endif %}
+                     {% if is_locked %}disabled{% endif %}
+                     onchange="toggleDeclarationType('team')">
+              团队申报（可动态添加/删除团队成员）
+            </label>
+          </div>
+        </div>
+
+        <!-- 团队成员动态编辑区 -->
+        <div id="team-members-panel"
+             style="margin-top:14px; padding:16px; border:1px solid #d5e2ec; border-radius:8px; background:#f8fbfd; {% if draft_data.declaration_type != 'team' %}display:none;{% endif %}">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+            <div>
+              <strong>团队成员列表</strong>
+              <span style="font-size:13px; color:#536777;">（申报人本人默认为队长，下方填写除本人外的其他队员信息；同一活动内学号不可跨项目重复）</span>
+            </div>
+            {% if not is_locked %}
+            <button type="button" class="btn btn-sm quiet" id="btn-add-member" onclick="addTeamMemberRow()">+ 添加队员行</button>
+            {% endif %}
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table" id="team-members-table">
+              <thead>
+                <tr>
+                  <th>队员学号 <span style="color:#c92a2a;">*</span></th>
+                  <th>队员姓名 <span style="color:#c92a2a;">*</span></th>
+                  <th>队员班级 <span style="color:#c92a2a;">*</span></th>
+                  {% if not is_locked %}<th style="width:90px;">操作</th>{% endif %}
+                </tr>
+              </thead>
+              <tbody id="team-members-tbody">
+                {% for member in draft_data.team_members %}
+                <tr class="team-member-row">
+                  <td>
+                    <input type="text" name="member_student_number" class="member-sn" placeholder="队员学号" value="{{ member.student_number }}" {% if is_locked %}disabled readonly{% endif %}>
+                  </td>
+                  <td>
+                    <input type="text" name="member_real_name" class="member-rn" placeholder="队员姓名" value="{{ member.real_name }}" {% if is_locked %}disabled readonly{% endif %}>
+                  </td>
+                  <td>
+                    <input type="text" name="member_class_name" class="member-cn" placeholder="队员班级" value="{{ member.class_name }}" {% if is_locked %}disabled readonly{% endif %}>
+                  </td>
+                  {% if not is_locked %}
+                  <td>
+                    <button type="button" class="btn btn-sm btn-danger" onclick="removeTeamMemberRow(this)">删除</button>
+                  </td>
+                  {% endif %}
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {% if not is_locked %}
+        <div class="action-bar">
+          <button type="button" id="btn-save-draft" onclick="saveDraftAjax(false)">💾 保存草稿</button>
+          <button type="button" id="btn-submit-review" class="btn-success" onclick="submitForReviewAjax()">🚀 正式提交审核</button>
+        </div>
+        {% endif %}
+      </form>
+    </section>
+
+    <!-- 5. 现代拖拽上传组件 + 实时上传进度条（原生 XMLHttpRequest upload.onprogress） -->
+    <section class="card" id="upload-workbench-section">
+      <h2>附件材料拖拽上传与管理</h2>
+      <p style="font-size:14px;">
+        支持将文件直接拖拽至对应材料框内或点击选择文件上传。前端将自动预检文件扩展名（<code>.docx / .pdf / .jpg / .png / .mp4</code>）与单文件体积上限（<code>20MB / 10MB / 300MB</code>），后端同步执行 32 字节文件头魔数硬性校验。
+      </p>
+
+      {% for sec in material_sections %}
+      <div class="upload-category-card"
+           id="material-card-{{ sec.code }}"
+           data-requirement-id="{{ sec.requirement.id }}"
+           data-requirement-code="{{ sec.code }}"
+           data-requirement-title="{{ sec.title }}"
+           data-allowed-exts='{{ sec.allowed_exts_json }}'
+           data-max-bytes="{{ sec.max_file_bytes }}"
+           data-max-mb="{{ sec.max_mb }}"
+           data-max-count="{{ sec.max_count }}"
+           data-is-single="{{ sec.is_single|yesno:'true,false' }}">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <div>
+            <strong>{{ sec.title }}</strong>
+            {% if sec.required %}
+              <span class="badge badge-required">必交</span>
+            {% else %}
+              <span class="badge badge-optional">选交</span>
+            {% endif %}
+            <span style="font-size:13px; color:#536777; margin-left:6px;">
+              允许格式：<strong>{{ sec.allowed_exts_display }}</strong> · 单文件上限：<strong>{{ sec.max_mb }}MB</strong> · {{ sec.count_hint }}
+            </span>
+          </div>
+          <span style="font-size:13px; color:#28798c;" id="count-badge-{{ sec.code }}">
+            已上传：<strong class="uploaded-count">{{ sec.uploads|length }}</strong> / {{ sec.max_count }} 份
+          </span>
+        </div>
+
+        {% if not is_locked %}
+        <div class="upload-dropzone"
+             id="dropzone-{{ sec.code }}"
+             onclick="triggerFileInput('{{ sec.code }}', '')"
+             ondragover="handleDragOver(event, this)"
+             ondragleave="handleDragLeave(event, this)"
+             ondrop="handleDrop(event, '{{ sec.code }}')">
+          <input type="file"
+                 id="file-input-{{ sec.code }}"
+                 accept="{{ sec.accept_attr }}"
+                 {% if not sec.is_single %}multiple{% endif %}
+                 style="display:none;"
+                 onchange="handleFileSelect(event, '{{ sec.code }}')">
+          <p style="margin:0; font-weight:600; color:#175e73;">
+            📂 将【{{ sec.title }}】文件拖拽到此处，或点击选择文件上传
+            {% if sec.is_single and sec.uploads %}（再次上传将自动覆盖旧文件）{% endif %}
+          </p>
+          <p style="margin:4px 0 0; font-size:12px; color:#647a8a;">
+            支持 {{ sec.allowed_exts_display }}，单个文件不超过 {{ sec.max_mb }}MB
+          </p>
+        </div>
+        {% else %}
+        <div class="upload-dropzone locked" data-upload-locked="true">
+          <p style="margin:0; font-size:13px; color:#6c7f8e;">🔒 当前状态已只读锁定，不可新增、覆盖或删除此项材料</p>
+        </div>
+        {% endif %}
+
+        <!-- 实时上传进度条 -->
+        <div class="upload-progress-wrapper" id="progress-wrap-{{ sec.code }}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="upload-progress-bar" id="progress-bar-{{ sec.code }}"></div>
+          <div class="upload-progress-text" id="progress-text-{{ sec.code }}">0%</div>
+        </div>
+
+        <!-- 已上传文件列表 -->
+        <ul class="uploaded-file-list" id="file-list-{{ sec.code }}">
+          {% for up in sec.uploads %}
+          <li class="uploaded-file-item" id="upload-item-{{ up.id }}" data-upload-id="{{ up.id }}">
+            <div>
+              <strong>{{ up.original_name }}</strong>
+              <span style="font-size:12px; color:#536777; margin-left:8px;">（{{ up.size_display }}）</span>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              {% if up.can_inline_preview %}
+              <a class="btn btn-sm quiet" href="{{ up.preview_url }}" target="_blank" rel="noopener">浏览器新窗口预览</a>
+              <a class="btn btn-sm quiet" href="{{ up.download_url }}">下载</a>
+              {% else %}
+              <a class="btn btn-sm quiet" href="{{ up.download_url }}">下载查看</a>
+              {% endif %}
+              {% if not is_locked %}
+              <button type="button" class="btn btn-sm quiet" onclick="triggerFileInput('{{ sec.code }}', '{{ up.id }}')">重新上传覆盖</button>
+              <button type="button" class="btn btn-sm btn-danger" onclick="deleteUploadedFile('{{ up.id }}', '{{ sec.code }}')">删除</button>
+              {% endif %}
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endfor %}
+    </section>
+
+    <!-- 审核历史记录展示 -->
+    {% if review_records %}
+    <section class="card">
+      <h2>历次审核记录</h2>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>审核阶段</th>
+              <th>审核结论</th>
+              <th>审核意见</th>
+              <th>审核人</th>
+              <th>审核时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for rec in review_records %}
+            <tr>
+              <td>{{ rec.get_stage_display }}</td>
+              <td>
+                <span class="badge {% if rec.decision == 'approved' %}badge-final_approved{% else %}badge-returned{% endif %}">
+                  {{ rec.get_decision_display }}
+                </span>
+              </td>
+              <td>{{ rec.comment|default:"（无附加意见）" }}</td>
+              <td>{{ rec.reviewer.real_name|default:rec.reviewer.username }}</td>
+              <td>{{ rec.created_at|date:"Y-m-d H:i" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+  {% endif %}
+
+{% else %}
+  <!-- ================================================================== -->
+  <!-- 初审（团支书） / 终审（指导老师） / 学院管理员工作台                 -->
+  <!-- ================================================================== -->
+  <p class="eyebrow">
+    {% if is_college_admin %}学院管理员 · 指导老师终审与全院归档中心{% else %}班级团支书 · 全院材料初审工作台{% endif %}
+  </p>
+  <h1>
+    {% if is_college_admin %}社会实践活动管理、终审与材料归档工作台{% else %}社会实践材料初审工作台{% endif %}
+  </h1>
+  <p class="lead">
+    当前登录：<strong>{{ user.real_name|default:user.username }}</strong>（{{ user.get_role_display }}）。
+    您可查看全院申报列表，按审核状态与班级筛选，在线预览 PDF/图片附件并执行审核流转。
+  </p>
+
+  {% if is_college_admin %}
+  <!-- ================================================================== -->
+  <!-- 管理员专属模块：活动配置、补交白名单管理与一键导出/按班级打包 ZIP     -->
+  <!-- ================================================================== -->
+  <section class="card" id="admin-management-panel">
+    <h2>⚙️ 管理员活动配置、补交白名单与全院归档导出</h2>
+    <div class="grid">
+      <!-- 1. 活动时间与开关配置 -->
+      <div style="border:1px solid #dce6ed; border-radius:8px; padding:16px; background:#fafcfe;">
+        <h3>1. 活动开始/截止时间配置</h3>
+        <form method="post" action="{% url 'admin-activity-save' %}" id="admin-activity-form">
+          {% csrf_token %}
+          <input type="hidden" name="activity_id" value="{{ selected_activity.id|default:'' }}">
+          <div class="form-row">
+            <label for="admin_act_title">活动名称</label>
+            <input type="text" name="title" id="admin_act_title" required value="{{ selected_activity.title|default:'2026年暑期社会实践活动' }}" placeholder="请输入活动名称">
+          </div>
+          <div class="grid">
+            <div class="form-row">
+              <label for="admin_act_opens_at">开始时间</label>
+              <input type="datetime-local" name="opens_at" id="admin_act_opens_at" required value="{{ selected_activity.opens_at|date:'Y-m-d\TH:i' }}">
+            </div>
+            <div class="form-row">
+              <label for="admin_act_deadline">截止时间</label>
+              <input type="datetime-local" name="deadline" id="admin_act_deadline" required value="{{ selected_activity.deadline|date:'Y-m-d\TH:i' }}">
+            </div>
+          </div>
+          <div class="form-row">
+            <label style="display:inline-flex; align-items:center; gap:8px; cursor:pointer;">
+              <input type="checkbox" name="is_open" value="true" style="width:auto; margin:0;" {% if not selected_activity or selected_activity.is_open %}checked{% endif %}>
+              立即开放申报通道
+            </label>
+          </div>
+          <button type="submit" class="btn btn-sm">保存活动时间配置</button>
+        </form>
+      </div>
+
+      <!-- 2. 补交白名单管理 -->
+      <div style="border:1px solid #dce6ed; border-radius:8px; padding:16px; background:#fafcfe;">
+        <h3>2. 逾期补交白名单管理</h3>
+        {% if selected_activity %}
+        <p style="font-size:13px;">活动截止后，白名单内的学号仍可正常创建/修改草稿、上传材料并提交审核。</p>
+        <form method="post" action="{% url 'admin-activity-whitelist' selected_activity.id %}" id="admin-whitelist-add-form" style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="add">
+          <div style="flex:1;">
+            <label for="whitelist_student_numbers">添加补交白名单学号（多个学号可用空格或逗号分隔）</label>
+            <input type="text" name="student_numbers" id="whitelist_student_numbers" required placeholder="例如：2025080901, 2025080902">
+          </div>
+          <button type="submit" class="btn btn-sm">添加白名单</button>
+        </form>
+
+        <div>
+          <strong style="font-size:13px;">当前白名单学号（{{ selected_activity.late_whitelist_student_numbers|length }} 人）：</strong>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;" id="whitelist-tags-container">
+            {% for sn in selected_activity.late_whitelist_student_numbers %}
+            <form method="post" action="{% url 'admin-activity-whitelist' selected_activity.id %}" style="display:inline-flex; align-items:center; gap:4px; background:#f3d9fa; color:#862e9c; padding:3px 10px; border-radius:999px; font-size:13px; font-weight:600;">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="remove">
+              <input type="hidden" name="student_numbers" value="{{ sn }}">
+              <span>{{ sn }}</span>
+              <button type="submit" title="移除 {{ sn }}" style="background:transparent; color:#862e9c; padding:0 4px; font-size:12px;">✕ 移除</button>
+            </form>
+            {% empty %}
+            <span style="font-size:13px; color:#6c7f8e;">当前未设置补交白名单学号</span>
+            {% endfor %}
+          </div>
+        </div>
+        {% else %}
+        <p>请先在左侧创建活动。</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- 3. 一键导出全院 6 列 Excel 汇总表 & 按班级打包下载 ZIP -->
+    {% if selected_activity %}
+    <div style="border:1px solid #dce6ed; border-radius:8px; padding:16px; background:#fafcfe; margin-top:16px;">
+      <h3>3. 全院汇总表导出与按班级打包下载 ZIP</h3>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
+        <a id="btn-export-all-excel"
+           class="btn"
+           href="{% url 'export-activity-excel' selected_activity.id %}">
+          📊 一键下载全院 6 列 Excel 汇总表 (.xlsx)
+        </a>
+        {% if status_filter or class_filter %}
+        <a class="btn quiet"
+           href="{% url 'export-activity-excel' selected_activity.id %}?status={{ status_filter|urlencode }}&class_name={{ class_filter|urlencode }}">
+          下载当前筛选结果 Excel
+        </a>
+        {% endif %}
+      </div>
+
+      <div>
+        <strong style="font-size:13px;">按班级分别点击打包下载归档材料（格式：<code>班级/姓名-学号-项目名称/标准材料名</code>）：</strong>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;" id="class-zip-export-list">
+          {% for cls in export_classes %}
+          <a class="btn btn-sm quiet class-zip-download-btn"
+             href="{% url 'export-activity-zip' selected_activity.id %}?class_name={{ cls|urlencode }}"
+             data-class-name="{{ cls }}">
+            📦 打包下载【{{ cls }}】ZIP
+          </a>
+          {% empty %}
+          <span style="font-size:13px; color:#6c7f8e;">当前活动暂无已提交班级数据</span>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <!-- ================================================================== -->
+  <!-- 审核筛选栏与全院申报列表                                             -->
+  <!-- ================================================================== -->
+  <section class="card" id="review-queue-section">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:16px;">
+      <h2 style="margin:0;">全院社会实践申报审核列表</h2>
+      {% if selected_activity and not is_college_admin %}
+      <a class="btn btn-sm quiet" href="{% url 'export-activity-excel' selected_activity.id %}">导出本范围 Excel 汇总表</a>
+      {% endif %}
+    </div>
+
+    {% if selected_activity %}
+    <!-- 状态统计快捷筛选徽章 -->
+    <div class="grid-5" style="margin-bottom:16px;">
+      <a class="activity-item {% if not status_filter %}active{% endif %}" href="?activity_id={{ selected_activity.id }}&class_name={{ class_filter|urlencode }}" style="padding:10px 14px;">
+        <div style="font-size:12px; color:#536777;">全部申报</div>
+        <strong style="font-size:20px;">{{ stats.total }}</strong>
+      </a>
+      <a class="activity-item {% if status_filter == 'pending_first_review' or status_filter == '待初审' %}active{% endif %}" href="?activity_id={{ selected_activity.id }}&status=pending_first_review&class_name={{ class_filter|urlencode }}" style="padding:10px 14px;">
+        <div style="font-size:12px; color:#1971c2;">待初审</div>
+        <strong style="font-size:20px; color:#1971c2;">{{ stats.pending_first_review }}</strong>
+      </a>
+      <a class="activity-item {% if status_filter == 'pending_final_review' or status_filter == '待终审' %}active{% endif %}" href="?activity_id={{ selected_activity.id }}&status=pending_final_review&class_name={{ class_filter|urlencode }}" style="padding:10px 14px;">
+        <div style="font-size:12px; color:#b45309;">待终审</div>
+        <strong style="font-size:20px; color:#b45309;">{{ stats.pending_final_review }}</strong>
+      </a>
+      <a class="activity-item {% if status_filter == 'final_approved' or status_filter == '已通过' or status_filter == '终审通过' %}active{% endif %}" href="?activity_id={{ selected_activity.id }}&status=final_approved&class_name={{ class_filter|urlencode }}" style="padding:10px 14px;">
+        <div style="font-size:12px; color:#2b8a3e;">已通过（终审通过）</div>
+        <strong style="font-size:20px; color:#2b8a3e;">{{ stats.final_approved }}</strong>
+      </a>
+      <a class="activity-item {% if status_filter == 'returned' or status_filter == '已退回' or status_filter == '打回修改' %}active{% endif %}" href="?activity_id={{ selected_activity.id }}&status=returned&class_name={{ class_filter|urlencode }}" style="padding:10px 14px;">
+        <div style="font-size:12px; color:#c92a2a;">已退回（打回修改）</div>
+        <strong style="font-size:20px; color:#c92a2a;">{{ stats.returned }}</strong>
+      </a>
+    </div>
+
+    <!-- 多维筛选表单（活动 + 状态 + 班级） -->
+    <form method="get" action="{% url 'dashboard' %}" id="review-filter-form" style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:18px; padding:14px; background:#f8fbfd; border-radius:8px; border:1px solid #e3ebf0;">
+      <div style="min-width:220px; flex:1;">
+        <label for="filter_activity_id">选择实践活动</label>
+        <select name="activity_id" id="filter_activity_id">
+          {% for act in activities %}
+          <option value="{{ act.id }}" {% if act.id == selected_activity.id %}selected{% endif %}>{{ act.title }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="min-width:180px;">
+        <label for="filter_status">按审核状态筛选</label>
+        <select name="status" id="filter_status">
+          <option value="">全部状态</option>
+          <option value="pending_first_review" {% if status_filter == "pending_first_review" or status_filter == "待初审" %}selected{% endif %}>待初审</option>
+          <option value="pending_final_review" {% if status_filter == "pending_final_review" or status_filter == "待终审" %}selected{% endif %}>待终审</option>
+          <option value="final_approved" {% if status_filter == "final_approved" or status_filter == "终审通过" or status_filter == "已通过" %}selected{% endif %}>已通过（终审通过）</option>
+          <option value="returned" {% if status_filter == "returned" or status_filter == "打回修改" or status_filter == "已退回" %}selected{% endif %}>已退回（打回修改）</option>
+          <option value="draft" {% if status_filter == "draft" or status_filter == "草稿" %}selected{% endif %}>草稿</option>
+        </select>
+      </div>
+      <div style="min-width:180px;">
+        <label for="filter_class_name">按班级筛选</label>
+        <select name="class_name" id="filter_class_name">
+          <option value="">全部班级</option>
+          {% for cls in available_classes %}
+          <option value="{{ cls }}" {% if class_filter == cls %}selected{% endif %}>{{ cls }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button type="submit" class="btn btn-sm">筛选查询</button>
+        <a class="btn btn-sm quiet" href="?activity_id={{ selected_activity.id }}">重置筛选</a>
+      </div>
+    </form>
+
+    <!-- 申报列表与内嵌审核详情抽屉 -->
+    <div class="table-wrap">
+      <table class="data-table" id="review-submissions-table">
+        <thead>
+          <tr>
+            <th>学号</th>
+            <th>姓名</th>
+            <th>班级</th>
+            <th>项目名称</th>
+            <th>类别</th>
+            <th>申报形式</th>
+            <th>附件数</th>
+            <th>审核状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in submission_items %}
+          <tr data-submission-row="{{ item.id }}">
+            <td>{{ item.student_number }}</td>
+            <td><strong>{{ item.real_name|default:item.student_number }}</strong></td>
+            <td>{{ item.class_name }}</td>
+            <td>{{ item.project_name|default:"（未命名项目）" }}</td>
+            <td>{{ item.category|default:"-" }}</td>
+            <td>{{ item.declaration_type_display }}</td>
+            <td>{{ item.attachments|length }} 份</td>
+            <td>
+              <span class="badge badge-{{ item.status }}">{{ item.status_display }}</span>
+            </td>
+            <td>
+              <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                <button type="button" class="btn btn-sm" onclick="toggleReviewDrawer('{{ item.id }}')">审核详情抽屉</button>
+                <a class="btn btn-sm quiet" href="{% url 'review-submission-detail' item.id %}">详情页</a>
+              </div>
+            </td>
+          </tr>
+          <!-- 审核详情抽屉（展示项目信息、团队成员、附件预览/下载与初审/终审操作） -->
+          <tr id="drawer-row-{{ item.id }}" style="{% if not item.is_drawer_open %}display:none;{% endif %}">
+            <td colspan="9" style="padding:0; border-bottom:none;">
+              <div class="drawer-panel" data-drawer-submission="{{ item.id }}">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+                  <h3 style="margin:0;">
+                    📋 申报详情与审核 · {{ item.project_name|default:"未命名项目" }}
+                    <span class="badge badge-{{ item.status }}">{{ item.status_display }}</span>
+                  </h3>
+                  <button type="button" class="btn btn-sm quiet" onclick="toggleReviewDrawer('{{ item.id }}')">收起抽屉</button>
+                </div>
+
+                <!-- 1. 项目信息与申报人信息 -->
+                <div class="grid" style="margin-bottom:14px;">
+                  <div>
+                    <p style="margin:3px 0;"><strong>申报人：</strong>{{ item.real_name }}（学号：{{ item.student_number }}）</p>
+                    <p style="margin:3px 0;"><strong>年级/专业/班级：</strong>{{ item.grade|default:"-" }} / {{ item.major|default:"-" }} / {{ item.class_name }}</p>
+                    <p style="margin:3px 0;"><strong>联系电话：</strong>{{ item.phone|default:"-" }}</p>
+                  </div>
+                  <div>
+                    <p style="margin:3px 0;"><strong>项目名称：</strong>{{ item.project_name|default:"-" }}</p>
+                    <p style="margin:3px 0;"><strong>项目类别：</strong>{{ item.category|default:"-" }}</p>
+                    <p style="margin:3px 0;"><strong>申报形式：</strong>{{ item.declaration_type_display }}</p>
+                  </div>
+                </div>
+
+                <!-- 2. 团队成员列表 -->
+                {% if item.team_members %}
+                <div style="margin-bottom:14px;">
+                  <strong>团队成员名单（共 {{ item.team_members|length }} 名队员）：</strong>
+                  <table class="data-table" style="margin-top:6px;">
+                    <thead>
+                      <tr>
+                        <th>队员学号</th>
+                        <th>队员姓名</th>
+                        <th>队员班级</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for tm in item.team_members %}
+                      <tr>
+                        <td>{{ tm.student_number }}</td>
+                        <td>{{ tm.real_name }}</td>
+                        <td>{{ tm.class_name }}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% endif %}
+
+                <!-- 3. 全部附件列表（PDF/图片提供浏览器新窗口在线预览，Word/视频提供下载查看） -->
+                <div style="margin-bottom:16px;">
+                  <strong>已上传附件材料清单（{{ item.attachments|length }} 份）：</strong>
+                  <ul class="uploaded-file-list">
+                    {% for att in item.attachments %}
+                    <li class="uploaded-file-item">
+                      <div>
+                        <span class="badge badge-optional">{{ att.requirement_title }}</span>
+                        <strong style="margin-left:6px;">{{ att.original_name }}</strong>
+                      </div>
+                      <div style="display:flex; gap:8px; align-items:center;">
+                        {% if att.can_inline_preview %}
+                        <a class="btn btn-sm preview-online-btn"
+                           href="{{ att.preview_url }}"
+                           target="_blank"
+                           rel="noopener">
+                          🔍 浏览器新窗口在线预览
+                        </a>
+                        <a class="btn btn-sm quiet" href="{{ att.download_url }}">下载文件</a>
+                        {% else %}
+                        <a class="btn btn-sm quiet download-only-btn" href="{{ att.download_url }}">⬇️ 下载查看</a>
+                        {% endif %}
+                      </div>
+                    </li>
+                    {% empty %}
+                    <li style="color:#6c7f8e; font-size:13px; padding:6px 0;">该申报暂未上传有效附件。</li>
+                    {% endfor %}
+                  </ul>
+                </div>
+
+                <!-- 4. 审核操作区（团支书初审 / 老师终审 + 打回意见双重强制校验） -->
+                {% if item.can_first_review or item.can_final_review %}
+                <div style="border-top:1px solid #d5e2ec; padding-top:14px; margin-top:10px;">
+                  <form method="post"
+                        action="{% url 'review-submission-action' item.id %}"
+                        class="review-action-form"
+                        id="review-form-{{ item.id }}"
+                        onsubmit="return validateReviewActionForm(this)">
+                    {% csrf_token %}
+                    <input type="hidden" name="activity_id" value="{{ item.activity_id }}">
+                    <input type="hidden" name="decision" value="approved" class="decision-input">
+                    <div class="form-row">
+                      <label for="comment-{{ item.id }}">
+                        审核意见（点击“打回修改”时<strong>必须填写打回意见</strong>，为空严禁提交）
+                      </label>
+                      <textarea name="comment"
+                                id="comment-{{ item.id }}"
+                                rows="2"
+                                placeholder="请填写审核意见；若打回修改，请详细写明需修改或补交的具体问题..."></textarea>
+                    </div>
+                    <div class="action-bar" style="margin-top:10px;">
+                      {% if item.can_first_review %}
+                      <button type="submit"
+                              class="btn btn-success"
+                              onclick="setReviewDecision(this.form, 'approved')">
+                        ✅ 初审通过（流转至待终审）
+                      </button>
+                      <button type="submit"
+                              class="btn btn-danger"
+                              onclick="setReviewDecision(this.form, 'returned')">
+                        ↩️ 打回修改（必填打回意见）
+                      </button>
+                      {% elif item.can_final_review %}
+                      <button type="submit"
+                              class="btn btn-success"
+                              onclick="setReviewDecision(this.form, 'approved')">
+                        🏆 终审通过（正式归档）
+                      </button>
+                      <button type="submit"
+                              class="btn btn-danger"
+                              onclick="setReviewDecision(this.form, 'returned')">
+                        ↩️ 打回修改（必填打回意见）
+                      </button>
+                      {% endif %}
+                    </div>
+                  </form>
+                </div>
+                {% else %}
+                <p style="font-size:13px; color:#536777; margin-top:10px;">
+                  当前状态为【{{ item.status_display }}】，无需您执行审核操作。
+                </p>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="9" style="text-align:center; color:#6c7f8e; padding:24px;">
+              当前筛选条件下暂无申报记录。
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+{% endif %}
+
+<!-- ================================================================== -->
+<!-- 轻量内联交互脚本（零外部 CDN 依赖，支持校园网/内网离线环境）          -->
+<!-- ================================================================== -->
+<script>
+(function() {
+  function getCsrfToken() {
+    var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
+    if (input && input.value) return input.value;
+    var match = document.cookie.match(/(?:^|;s*)csrftoken=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
+
+  function showFeedback(message, isError) {
+    var banner = document.getElementById("form-feedback-banner");
+    if (!banner) {
+      window.alert(message);
+      return;
+    }
+    banner.style.display = "block";
+    banner.className = isError ? "alert-error" : "alert-success";
+    banner.textContent = message;
+  }
+
+  // 1. 个人申报 / 团队申报切换与动态增删队员行
+  window.toggleDeclarationType = function(typeVal) {
+    var panel = document.getElementById("team-members-panel");
+    if (!panel) return;
+    if (typeVal === "team") {
+      panel.style.display = "block";
+      var tbody = document.getElementById("team-members-tbody");
+      if (tbody && tbody.querySelectorAll(".team-member-row").length === 0) {
+        window.addTeamMemberRow();
+      }
+    } else {
+      panel.style.display = "none";
+    }
+  };
+
+  window.addTeamMemberRow = function(sn, rn, cn) {
+    var tbody = document.getElementById("team-members-tbody");
+    if (!tbody) return;
+    var tr = document.createElement("tr");
+    tr.className = "team-member-row";
+    tr.innerHTML =
+      '<td><input type="text" name="member_student_number" class="member-sn" placeholder="队员学号" value="' + (sn || "") + '"></td>' +
+      '<td><input type="text" name="member_real_name" class="member-rn" placeholder="队员姓名" value="' + (rn || "") + '"></td>' +
+      '<td><input type="text" name="member_class_name" class="member-cn" placeholder="队员班级" value="' + (cn || "") + '"></td>' +
+      '<td><button type="button" class="btn btn-sm btn-danger" onclick="removeTeamMemberRow(this)">删除</button></td>';
+    tbody.appendChild(tr);
+  };
+
+  window.removeTeamMemberRow = function(btn) {
+    var row = btn.closest("tr");
+    if (row && row.parentNode) {
+      row.parentNode.removeChild(row);
+    }
+  };
+
+  function collectDraftDataFromForm() {
+    var projectNameEl = document.getElementById("input_project_name");
+    var categoryEl = document.getElementById("input_category");
+    var teamRadio = document.getElementById("radio_decl_team");
+    var declType = (teamRadio && teamRadio.checked) ? "team" : "individual";
+    var members = [];
+
+    if (declType === "team") {
+      var rows = document.querySelectorAll("#team-members-tbody .team-member-row");
+      for (var i = 0; i < rows.length; i++) {
+        var sn = (rows[i].querySelector(".member-sn") || {}).value || "";
+        var rn = (rows[i].querySelector(".member-rn") || {}).value || "";
+        var cn = (rows[i].querySelector(".member-cn") || {}).value || "";
+        sn = sn.trim();
+        rn = rn.trim();
+        cn = cn.trim();
+        if (sn || rn || cn) {
+          members.push({
+            student_number: sn,
+            real_name: rn,
+            class_name: cn
+          });
+        }
+      }
+    }
+
+    return {
+      project_name: projectNameEl ? projectNameEl.value.trim() : "",
+      category: categoryEl ? categoryEl.value.trim() : "社会调查",
+      declaration_type: declType,
+      team_members: members
+    };
+  }
+
+  // 2. 保存草稿与正式提交审核（AJAX 调用后端 REST API）
+  window.saveDraftAjax = function(silent) {
+    var subIdEl = document.getElementById("input_submission_id");
+    var actIdEl = document.getElementById("input_activity_id");
+    var verEl = document.getElementById("input_expected_version");
+    var draftData = collectDraftDataFromForm();
+
+    if (!draftData.project_name) {
+      window.alert("请先填写社会实践项目名称！");
+      showFeedback("请先填写社会实践项目名称！", true);
+      return Promise.reject(new Error("missing_project_name"));
+    }
+
+    if (draftData.declaration_type === "team") {
+      for (var i = 0; i < draftData.team_members.length; i++) {
+        var m = draftData.team_members[i];
+        if (!m.student_number || !m.real_name || !m.class_name) {
+          window.alert("团队成员第 " + (i + 1) + " 行的学号、姓名、班级均不能为空！");
+          return Promise.reject(new Error("incomplete_member"));
+        }
+      }
+    }
+
+    var ensureSubPromise;
+    if (subIdEl && subIdEl.value) {
+      ensureSubPromise = Promise.resolve(subIdEl.value);
+    } else {
+      ensureSubPromise = fetch("/api/v1/submissions/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCsrfToken()
+        },
+        body: JSON.stringify({ activity_id: actIdEl.value })
+      }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.error) throw new Error(data.error.message);
+        if (subIdEl) subIdEl.value = data.id;
+        if (verEl) verEl.value = data.version;
+        return data.id;
+      });
+    }
+
+    return ensureSubPromise.then(function(submissionId) {
+      var expectedVersion = verEl ? parseInt(verEl.value || "0", 10) : 0;
+      return fetch("/api/v1/submissions/" + submissionId + "/", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCsrfToken()
+        },
+        body: JSON.stringify({
+          expected_version: expectedVersion,
+          draft_data: draftData
+        })
+      });
+    }).then(function(resp) {
+      return resp.json().then(function(body) {
+        if (!resp.ok || body.error) {
+          throw new Error((body.error && body.error.message) || "保存草稿失败");
+        }
+        if (verEl) verEl.value = body.version;
+        if (!silent) {
+          showFeedback("草稿保存成功（当前版本 v" + body.version + "）！", false);
+        }
+        return body;
+      });
+    }).catch(function(err) {
+      if (!silent) {
+        showFeedback(err.message || "保存失败", true);
+        window.alert(err.message || "保存失败");
+      }
+      throw err;
+    });
+  };
+
+  window.submitForReviewAjax = function() {
+    window.saveDraftAjax(true).then(function(saved) {
+      return fetch("/api/v1/submissions/" + saved.id + "/submit/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCsrfToken()
+        },
+        body: JSON.stringify({})
+      }).then(function(resp) {
+        return resp.json().then(function(body) {
+          if (!resp.ok || body.error) {
+            throw new Error((body.error && body.error.message) || "正式提交失败");
+          }
+          window.alert("正式提交成功！您的申报已进入【待初审】状态。");
+          window.location.reload();
+        });
+      });
+    }).catch(function(err) {
+      if (err && err.message && err.message !== "missing_project_name" && err.message !== "incomplete_member") {
+        showFeedback(err.message, true);
+        window.alert(err.message);
+      }
+    });
+  };
+
+  // 3. 现代拖拽上传 + 前端后缀与体积上限校验 + XMLHttpRequest upload.onprogress 实时进度条
+  var pendingReplaceUploadIdByCode = {};
+
+  window.validateFileBeforeUpload = function(file, allowedExts, maxBytes, categoryTitle) {
+    if (!file || !file.name) {
+      window.alert("请选择有效的文件！");
+      return false;
+    }
+    var dotIdx = file.name.lastIndexOf(".");
+    var ext = dotIdx >= 0 ? file.name.slice(dotIdx).toLowerCase() : "";
+    var normalizedAllowed = (allowedExts || []).map(function(x) { return String(x).toLowerCase(); });
+
+    if (normalizedAllowed.indexOf(ext) === -1) {
+      var msg = "【" + categoryTitle + "】文件格式不合规：仅允许上传 " + normalizedAllowed.join(" / ") + " 格式，当前文件为 " + (ext || "无后缀") + "。";
+      window.alert(msg);
+      showFeedback(msg, true);
+      return false;
+    }
+    if (file.size <= 0) {
+      var emptyMsg = "【" + categoryTitle + "】文件大小不能为 0 字节！";
+      window.alert(emptyMsg);
+      showFeedback(emptyMsg, true);
+      return false;
+    }
+    if (file.size > maxBytes) {
+      var maxMb = Math.round(maxBytes / (1024 * 1024));
+      var fileMb = (file.size / (1024 * 1024)).toFixed(2);
+      var sizeMsg = "【" + categoryTitle + "】单文件大小超出上限：最大允许 " + maxMb + "MB，当前文件为 " + fileMb + "MB。";
+      window.alert(sizeMsg);
+      showFeedback(sizeMsg, true);
+      return false;
+    }
+    return true;
+  };
+
+  window.triggerFileInput = function(code, replaceUploadId) {
+    pendingReplaceUploadIdByCode[code] = replaceUploadId || "";
+    var input = document.getElementById("file-input-" + code);
+    if (input) {
+      input.value = "";
+      input.click();
+    }
+  };
+
+  window.handleDragOver = function(evt, zoneEl) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (zoneEl) zoneEl.classList.add("dragover");
+  };
+
+  window.handleDragLeave = function(evt, zoneEl) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (zoneEl) zoneEl.classList.remove("dragover");
+  };
+
+  window.handleDrop = function(evt, code) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    var zoneEl = document.getElementById("dropzone-" + code);
+    if (zoneEl) zoneEl.classList.remove("dragover");
+    pendingReplaceUploadIdByCode[code] = "";
+    var files = evt.dataTransfer && evt.dataTransfer.files ? evt.dataTransfer.files : [];
+    processSelectedFiles(code, files);
+  };
+
+  window.handleFileSelect = function(evt, code) {
+    var files = evt.target && evt.target.files ? evt.target.files : [];
+    processSelectedFiles(code, files);
+  };
+
+  function processSelectedFiles(code, fileList) {
+    var card = document.getElementById("material-card-" + code);
+    if (!card || !fileList || fileList.length === 0) return;
+
+    var reqId = card.getAttribute("data-requirement-id");
+    var title = card.getAttribute("data-requirement-title") || code;
+    var allowedExts = JSON.parse(card.getAttribute("data-allowed-exts") || "[]");
+    var maxBytes = parseInt(card.getAttribute("data-max-bytes") || "20971520", 10);
+    var replaceId = pendingReplaceUploadIdByCode[code] || "";
+
+    var validFiles = [];
+    for (var i = 0; i < fileList.length; i++) {
+      if (!window.validateFileBeforeUpload(fileList[i], allowedExts, maxBytes, title)) {
+        return;
+      }
+      validFiles.push(fileList[i]);
+    }
+
+    var chain = Promise.resolve();
+    validFiles.forEach(function(file) {
+      chain = chain.then(function() {
+        return uploadSingleFileWithProgress(code, reqId, file, replaceId);
+      });
+    });
+  }
+
+  function uploadSingleFileWithProgress(code, requirementId, file, replaceUploadId) {
+    return new Promise(function(resolve, reject) {
+      var wrap = document.getElementById("progress-wrap-" + code);
+      var bar = document.getElementById("progress-bar-" + code);
+      var txt = document.getElementById("progress-text-" + code);
+
+      if (wrap && bar && txt) {
+        wrap.style.display = "block";
+        bar.style.width = "0%";
+        wrap.setAttribute("aria-valuenow", "0");
+        txt.textContent = "正在上传 " + file.name + " (0%)";
+      }
+
+      var formData = new FormData();
+      formData.append("requirement_id", requirementId);
+      formData.append("file", file);
+      if (replaceUploadId) {
+        formData.append("replace_upload_id", replaceUploadId);
+      }
+
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/v1/uploads/direct-upload/", true);
+      xhr.setRequestHeader("X-CSRFToken", getCsrfToken());
+
+      xhr.upload.onprogress = function(evt) {
+        if (evt.lengthComputable && bar && txt && wrap) {
+          var percent = Math.min(100, Math.round((evt.loaded / evt.total) * 100));
+          bar.style.width = percent + "%";
+          wrap.setAttribute("aria-valuenow", String(percent));
+          txt.textContent = "正在上传 " + file.name + " (" + percent + "%)";
+        }
+      };
+
+      xhr.onload = function() {
+        var respBody = {};
+        try {
+          respBody = JSON.parse(xhr.responseText || "{}");
+        } catch (e) {}
+
+        if (xhr.status >= 200 && xhr.status < 300 && respBody.id) {
+          if (bar && txt && wrap) {
+            bar.style.width = "100%";
+            wrap.setAttribute("aria-valuenow", "100");
+            txt.textContent = "上传完成 100%";
+          }
+          renderUploadedItemInList(code, respBody);
+          showFeedback("文件【" + respBody.original_name + "】上传成功！", false);
+          resolve(respBody);
+        } else {
+          var errMsg = (respBody.error && respBody.error.message) || ("上传失败 (HTTP " + xhr.status + ")");
+          if (txt) txt.textContent = errMsg;
+          window.alert(errMsg);
+          showFeedback(errMsg, true);
+          reject(new Error(errMsg));
+        }
+      };
+
+      xhr.onerror = function() {
+        var netErr = "网络传输中断，请检查网络连接后重试。";
+        window.alert(netErr);
+        showFeedback(netErr, true);
+        reject(new Error(netErr));
+      };
+
+      xhr.send(formData);
+    });
+  }
+
+  function renderUploadedItemInList(code, uploadData) {
+    var listEl = document.getElementById("file-list-" + code);
+    var card = document.getElementById("material-card-" + code);
+    if (!listEl || !card) return;
+
+    var isSingle = card.getAttribute("data-is-single") === "true";
+    if (isSingle) {
+      listEl.innerHTML = "";
+    } else if (Array.isArray(uploadData.replaced_upload_ids)) {
+      uploadData.replaced_upload_ids.forEach(function(oldId) {
+        var oldItem = document.getElementById("upload-item-" + oldId);
+        if (oldItem && oldItem.parentNode) oldItem.parentNode.removeChild(oldItem);
+      });
+    }
+
+    var dotIdx = uploadData.original_name.lastIndexOf(".");
+    var ext = dotIdx >= 0 ? uploadData.original_name.slice(dotIdx).toLowerCase() : "";
+    var canPreview = [".pdf", ".jpg", ".jpeg", ".png"].indexOf(ext) !== -1;
+    var sizeKb = (uploadData.actual_bytes / 1024).toFixed(1) + " KB";
+    if (uploadData.actual_bytes >= 1024 * 1024) {
+      sizeKb = (uploadData.actual_bytes / (1024 * 1024)).toFixed(2) + " MB";
+    }
+
+    var li = document.createElement("li");
+    li.className = "uploaded-file-item";
+    li.id = "upload-item-" + uploadData.id;
+    li.setAttribute("data-upload-id", uploadData.id);
+
+    var actionsHtml = "";
+    if (canPreview) {
+      actionsHtml += '<a class="btn btn-sm quiet" href="' + uploadData.file_url + '?inline=1" target="_blank" rel="noopener">浏览器新窗口预览</a> ';
+      actionsHtml += '<a class="btn btn-sm quiet" href="' + uploadData.file_url + '">下载</a> ';
+    } else {
+      actionsHtml += '<a class="btn btn-sm quiet" href="' + uploadData.file_url + '">下载查看</a> ';
+    }
+    actionsHtml += '<button type="button" class="btn btn-sm quiet" onclick="triggerFileInput('' + code + '', '' + uploadData.id + '')">重新上传覆盖</button> ';
+    actionsHtml += '<button type="button" class="btn btn-sm btn-danger" onclick="deleteUploadedFile('' + uploadData.id + '', '' + code + '')">删除</button>';
+
+    li.innerHTML =
+      '<div><strong>' + uploadData.original_name + '</strong><span style="font-size:12px; color:#536777; margin-left:8px;">（' + sizeKb + '）</span></div>' +
+      '<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' + actionsHtml + '</div>';
+
+    listEl.appendChild(li);
+    updateCategoryCountBadge(code);
+  }
+
+  window.deleteUploadedFile = function(uploadId, code) {
+    fetch("/api/v1/uploads/" + uploadId + "/delete/", {
+      method: "POST",
+      headers: {
+        "X-CSRFToken": getCsrfToken()
+      }
+    }).then(function(resp) {
+      return resp.json().then(function(body) {
+        if (!resp.ok || body.error) {
+          throw new Error((body.error && body.error.message) || "删除失败");
+        }
+        var item = document.getElementById("upload-item-" + uploadId);
+        if (item && item.parentNode) item.parentNode.removeChild(item);
+        updateCategoryCountBadge(code);
+        showFeedback("已删除该附件材料。", false);
+      });
+    }).catch(function(err) {
+      window.alert(err.message || "删除失败");
+    });
+  };
+
+  function updateCategoryCountBadge(code) {
+    var listEl = document.getElementById("file-list-" + code);
+    var badgeEl = document.getElementById("count-badge-" + code);
+    if (!listEl || !badgeEl) return;
+    var countSpan = badgeEl.querySelector(".uploaded-count");
+    if (countSpan) {
+      countSpan.textContent = String(listEl.querySelectorAll(".uploaded-file-item").length);
+    }
+  }
+
+  // 4. 审核员/老师抽屉展开与打回修改意见前端强制校验
+  window.toggleReviewDrawer = function(submissionId) {
+    var row = document.getElementById("drawer-row-" + submissionId);
+    if (!row) return;
+    row.style.display = (row.style.display === "none" || !row.style.display) ? "table-row" : "none";
+  };
+
+  window.setReviewDecision = function(formEl, decisionVal) {
+    if (!formEl) return;
+    var decInput = formEl.querySelector(".decision-input");
+    if (decInput) decInput.value = decisionVal;
+  };
+
+  window.validateReviewActionForm = function(formEl) {
+    if (!formEl) return true;
+    var decInput = formEl.querySelector(".decision-input");
+    var commentEl = formEl.querySelector('textarea[name="comment"]');
+    var decision = decInput ? decInput.value : "approved";
+    var comment = commentEl ? commentEl.value.trim() : "";
+
+    if (decision === "returned" && !comment) {
+      window.alert("打回修改时必须填写打回意见，原因不能为空！");
+      if (commentEl) commentEl.focus();
+      return false;
+    }
+    return true;
+  };
+})();
+</script>
 {% endblock %}
