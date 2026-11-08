@@ -4,6 +4,7 @@ import json
 import uuid
 from django.db import transaction
 from apps.accounts.permissions import require_student
+from django.utils import timezone
 from apps.activities.models import Activity
 from apps.activities.selectors import ensure_activity_open
 from apps.audit.services import record
@@ -86,6 +87,19 @@ def normalize_and_validate_draft_data(data, *, actor):
     return normalized
 
 
+def is_late_submission_attempt(activity: Activity, student_number, *, now=None) -> bool:
+    """活动截止后、命中补交白名单且补交通道仍开放 -> 本次提交属于迟交。
+
+    白名单查询集中在服务层，视图与模板只消费 Submission.is_late_submission，
+    避免每个页面各自去读 Activity.late_whitelist_student_numbers。
+    """
+    moment = now or timezone.now()
+    target = str(student_number or "").strip()
+    if not target or moment < activity.deadline:
+        return False
+    return activity.is_in_late_whitelist(target) and activity.late_submission_allowed_at(moment)
+
+
 def _extract_participant_student_numbers(*, owner_student_number, draft_data):
     participants = []
     seen = set()
@@ -153,7 +167,7 @@ def save_draft(*, actor, submission_id, expected_version, data):
     require_student(actor)
     if type(expected_version) is not int or expected_version < 0:
         raise DomainError("expected_version 必须为非负整数。")
-    normalized_data = normalize_and_normalize_check(data, actor=actor)
+    normalized_data = normalize_and_validate_draft_data(data, actor=actor)
     submission = Submission.objects.select_for_update().get(pk=submission_id, owner=actor)
     ensure_activity_open(submission.activity, actor)
     if submission.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED):
@@ -171,10 +185,6 @@ def save_draft(*, actor, submission_id, expected_version, data):
     submission.save(update_fields=["draft_data", "version", "updated_at"])
     record(actor=actor, action="submission.draft_saved", target=submission, metadata={"version": submission.version})
     return submission
-
-
-def normalize_and_normalize_check(data, *, actor):
-    return normalize_and_validate_draft_data(data, actor=actor)
 
 
 @transaction.atomic
@@ -210,12 +220,18 @@ def submit_for_review(*, actor, submission_id, request_key=None):
         request_key=key,
     )
     submission.status = Submission.Status.PENDING_FIRST_REVIEW
+    submission.is_late_submission = is_late_submission_attempt(submission.activity, actor.username)
     submission.version += 1
-    submission.save(update_fields=["draft_data", "status", "version", "updated_at"])
+    submission.save(update_fields=["draft_data", "status", "is_late_submission", "version", "updated_at"])
     record(
         actor=actor,
         action="submission.submitted",
         target=submission,
-        metadata={"revision_id": str(revision.id), "revision_number": revision.number, "status": submission.status},
+        metadata={
+            "revision_id": str(revision.id),
+            "revision_number": revision.number,
+            "status": submission.status,
+            "is_late_submission": submission.is_late_submission,
+        },
     )
     return submission, revision

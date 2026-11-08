@@ -1,3 +1,5 @@
 -r base.in
 pytest>=8,<10
 pytest-django>=4.11,<5
+# 压测脚本 scripts/stress_test.py 用 requests + 线程池模拟并发学生。
+requests>=2.31,<3

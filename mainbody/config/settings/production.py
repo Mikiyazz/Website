@@ -8,6 +8,8 @@ if not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS or set(ALLOWED_HOSTS) <= {"localhos
 if not CSRF_TRUSTED_ORIGINS or any(not origin.startswith("https://") for origin in CSRF_TRUSTED_ORIGINS):
     raise ImproperlyConfigured("Production requires HTTPS CSRF trusted origins.")
 DEBUG = False
+# 生产环境必须由独立的 Celery worker 执行导出等长任务，禁止在 Web 进程内同步执行。
+CELERY_TASK_ALWAYS_EAGER = False
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 SECURE_SSL_REDIRECT = True

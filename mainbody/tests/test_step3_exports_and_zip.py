@@ -10,15 +10,17 @@ from apps.reviews.services import review_submission
 from apps.submissions.models import Submission
 from apps.submissions.services import create_draft, save_draft, submit_for_review
 from apps.uploads.services import direct_upload, ensure_standard_material_requirements
+from tests.fixtures.samples import REAL_JPEG, REAL_PNG
 
 
 def _upload_full_student_materials(student, activity, reqs, *, include_optional=True):
     """为指定学生上传全套标准材料并返回各文件原始字节字典。"""
     docx_bytes = b"PK\x03\x04" + f"docx-for-{student.username}".encode("utf-8") * 8
     pdf_bytes = b"%PDF-1.7\n" + f"report-for-{student.username}".encode("utf-8") * 8
-    jpg1_bytes = b"\xff\xd8\xff\xe0" + f"jpg1-{student.username}".encode("utf-8") * 8
-    jpg2_bytes = b"\xff\xd8\xff\xe0" + f"jpg2-{student.username}".encode("utf-8") * 8
-    png3_bytes = b"\x89PNG\r\n\x1a\n" + f"png3-{student.username}".encode("utf-8") * 8
+    # 现场照片必须是真实可解析图片：图片结构校验会拒绝伪造样本；用 NUL 填充保证三份内容互不相同。
+    jpg1_bytes = REAL_JPEG
+    jpg2_bytes = REAL_JPEG + bytes([0]) * 4
+    png3_bytes = REAL_PNG
 
     direct_upload(
         actor=student,
@@ -57,7 +59,7 @@ def _upload_full_student_materials(student, activity, reqs, *, include_optional=
     if include_optional:
         mp4_bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + f"video-{student.username}".encode("utf-8") * 16
         other1_bytes = b"%PDF-1.7\n" + f"cert1-{student.username}".encode("utf-8") * 8
-        other2_bytes = b"\xff\xd8\xff\xe0" + f"cert2-{student.username}".encode("utf-8") * 8
+        other2_bytes = REAL_JPEG + bytes([0]) * 8
 
         direct_upload(
             actor=student,

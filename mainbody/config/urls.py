@@ -5,6 +5,7 @@ from django.urls import include, path
 from django.views.generic import TemplateView
 from apps.accounts import views as account_views
 from apps.common.health import live, ready
+from apps.submissions import views as submission_views
 
 urlpatterns = [
     path("health/live/", live),
@@ -13,17 +14,25 @@ urlpatterns = [
     path("accounts/login/", LoginView.as_view(template_name="registration/login.html"), name="login"),
     path("accounts/logout/", LogoutView.as_view(), name="logout"),
     path("accounts/register/", account_views.register_page_view, name="register-page"),
+    path("register/", account_views.register_page_view),
     path("accounts/password-change/", account_views.change_password_page_view, name="password-change-page"),
     path("accounts/change-password/", account_views.change_password_page_view, name="change-password-page"),
     path("student/workbench/", account_views.dashboard_view, name="student-workbench"),
+    # 学生端四步申报向导（页面入口；API 前缀下另有一份同名视图 /api/v1/submissions/apply/）
+    path("submissions/apply/", submission_views.apply, name="submission-apply-page"),
+    # 队员学号占位查询：前端调用 /api/students/lookup/?student_number=...
+    path("api/students/lookup/", account_views.student_lookup_view, name="student-lookup"),
     path("student/submissions/save/", account_views.student_save_draft_view, name="student-save-draft"),
     path("student/submissions/<uuid:submission_id>/submit/", account_views.student_submit_review_view, name="student-submit-review"),
-    path("reviews/workbench/", account_views.dashboard_view, name="review-workbench"),
+    path("reviews/workbench/", account_views.review_workbench_view, name="review-workbench"),
     path("reviews/submissions/<uuid:submission_id>/", account_views.review_submission_detail_view, name="review-submission-detail"),
     path("reviews/submissions/<uuid:submission_id>/action/", account_views.review_submission_action_view, name="review-submission-action"),
-    path("admin-panel/", account_views.dashboard_view, name="admin-panel"),
+    path("admin-panel/", account_views.admin_panel_view, name="admin-panel"),
     path("admin-panel/activities/save/", account_views.admin_save_activity_view, name="admin-activity-save"),
     path("admin-panel/activities/<uuid:activity_id>/whitelist/", account_views.admin_whitelist_action_view, name="admin-activity-whitelist"),
+    # 补交设置卡片：开关 + 补交截止时间 + 批量粘贴学号（全量保存）与实时校验
+    path("admin-panel/activities/<uuid:activity_id>/late-settings/", account_views.admin_late_settings_view, name="admin-activity-late-settings"),
+    path("admin-panel/activities/<uuid:activity_id>/whitelist/parse/", account_views.admin_parse_whitelist_view, name="admin-activity-whitelist-parse"),
     path("api/v1/accounts/", include("apps.accounts.urls")),
     path("api/v1/activities/", include("apps.activities.urls")),
     path("api/v1/submissions/", include("apps.submissions.urls")),

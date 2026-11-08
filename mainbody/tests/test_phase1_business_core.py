@@ -1,11 +1,11 @@
 import pytest
 from apps.accounts.admin import PlatformUserAdmin
-from apps.accounts.models import User, StudentRoster
+from apps.accounts.models import User
 from apps.accounts.services import register_student
 from apps.common.errors import Conflict, DomainError, Forbidden
 from apps.reviews.models import ReviewAssignment, ReviewRecord
 from apps.reviews.services import review_submission
-from apps.submissions.models import Submission, SubmissionRevision
+from apps.submissions.models import Submission
 from apps.submissions.services import create_draft, save_draft, submit_for_review
 from tests.conftest import seed_mandatory_materials
 from django.contrib.admin.sites import AdminSite

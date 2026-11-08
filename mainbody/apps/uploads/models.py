@@ -28,6 +28,10 @@ class UploadSession(BaseModel):
         ABORTING = "aborting", "取消中"
         ABORTED = "aborted", "已取消"
 
+    class Mode(models.TextChoices):
+        DIRECT = "direct", "单请求直传"
+        CHUNKED = "chunked", "浏览器分片上传"
+
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     requirement = models.ForeignKey("activities.MaterialRequirement", on_delete=models.PROTECT)
     quota = models.ForeignKey(StorageQuota, on_delete=models.PROTECT)
@@ -37,7 +41,17 @@ class UploadSession(BaseModel):
     declared_bytes = models.PositiveBigIntegerField()
     storage_upload_id = models.CharField(max_length=512, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.RESERVED)
+    # 分片上传元数据：upload_mode=chunked 时 total_chunks/chunk_size_bytes 才有意义，
+    # 单片大小由服务端在 chunk_start 下发，前端不得自行决定。
+    upload_mode = models.CharField(max_length=16, choices=Mode.choices, default=Mode.DIRECT)
+    total_chunks = models.PositiveIntegerField(default=1)
+    chunk_size_bytes = models.PositiveBigIntegerField(default=5 * 1024 * 1024)
     expires_at = models.DateTimeField()
+
+    @property
+    def final_path(self) -> str:
+        """MEDIA_ROOT-relative path of the stored file; empty until the merge finished."""
+        return self.object_key if self.status == self.Status.COMPLETE else ""
 
     class Meta:
         constraints = [

@@ -1,15 +1,42 @@
 from datetime import timedelta
 from pathlib import Path
-import json
+import re
+import shutil
+import subprocess
+import tempfile
 import pytest
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from apps.accounts.models import User
-from apps.activities.models import Activity
 from apps.submissions.models import Submission
-from apps.uploads.services import direct_upload, ensure_standard_material_requirements
+from apps.uploads.services import direct_upload
 from tests.conftest import seed_mandatory_materials
+
+
+def assert_inline_scripts_parsable(html: str) -> None:
+    """页面内联 <script> 必须能被 JS 引擎解析。
+
+    2026-11 的线上缺陷：工作台脚本里一处引号写成 ('') ，整段脚本 SyntaxError，
+    浏览器静默丢弃后 triggerFileInput 等函数全部未注册，点击上传区毫无反应。
+    Python 测试原本只断言 HTML 字符串，捕捉不到这类前端整页失效，故在此补一条。
+    Node 不可用时直接跳过（不阻塞无前端工具链的环境）。
+    """
+    node = shutil.which("node")
+    if not node:
+        return
+    scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S | re.I)
+    for index, body in enumerate(scripts):
+        if not body.strip():
+            continue
+        handle = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8")
+        try:
+            handle.write(body)
+            handle.close()
+            result = subprocess.run([node, "--check", handle.name], capture_output=True, text=True)
+        finally:
+            Path(handle.name).unlink(missing_ok=True)
+        assert result.returncode == 0, f"页面第 {index + 1} 段内联脚本存在语法错误：{result.stderr.strip()[:800]}"
 
 
 # =====================================================================
@@ -138,6 +165,11 @@ def test_student_workbench_drag_upload_returned_banner_and_readonly_lock(client,
     assert 'id="dropzone-scene_photos"' in html
     assert 'id="dropzone-video"' in html
     assert 'id="dropzone-other_materials"' in html
+
+    # 内联脚本必须整体可解析：否则 triggerFileInput/handleFileSelect 等函数不会注册，
+    # 点击「选择文件上传」和拖拽都会被浏览器静默忽略。
+    assert_inline_scripts_parsable(html)
+    assert 'onclick="triggerFileInput(' in html
 
     # 学生通过工作台表单保存团队申报草稿
     sub = Submission.objects.get(owner=student, activity=activity)
@@ -386,14 +418,111 @@ def test_admin_activity_config_whitelist_and_export_ui(client, activity, db):
 # =====================================================================
 
 def test_nginx_and_gunicorn_deployment_config_aligned():
-    """验证 deploy/nginx.conf 中 client_max_body_size 设为 350m 及超时参数对齐 300MB 视频上传需求。"""
+    """验证 deploy/nginx.conf 的正文上限与超时已对齐 2000MB 打包材料上传需求。"""
     nginx_conf_path = Path(settings.BASE_DIR) / "deploy" / "nginx.conf"
     nginx_text = nginx_conf_path.read_text(encoding="utf-8")
-    assert "client_max_body_size 350m;" in nginx_text
-    assert "client_body_timeout 300s;" in nginx_text
-    assert "proxy_read_timeout 300s;" in nginx_text
-    assert "proxy_send_timeout 300s;" in nginx_text
+    assert "client_max_body_size 2100m;" in nginx_text
+    assert "client_body_timeout 600s;" in nginx_text
+    assert "proxy_read_timeout 600s;" in nginx_text
+    assert "proxy_send_timeout 600s;" in nginx_text
 
     gunicorn_conf_path = Path(settings.BASE_DIR) / "deploy" / "gunicorn.conf.py"
     gunicorn_text = gunicorn_conf_path.read_text(encoding="utf-8")
-    assert "timeout = 300" in gunicorn_text
+    assert "timeout = 600" in gunicorn_text
+
+
+@pytest.mark.django_db
+def test_sidebar_navigation_by_role_and_no_403(client, student, activity):
+    """验证各角色左侧菜单项按权限区分展示，初审与终审人员不出现我的申报且访问无 403。"""
+    reviewer = User.objects.create_user(
+        username="reviewer_menu_test",
+        password="password123",
+        real_name="李团支书",
+        role=User.Role.REVIEWER,
+        class_name="信安25-1班",
+        must_change_password=False,
+    )
+    admin_user = User.objects.create_user(
+        username="admin_menu_test",
+        password="password123",
+        real_name="学院管理员",
+        role=User.Role.ADMIN,
+        is_staff=True,
+        must_change_password=False,
+    )
+
+    # 1. 学生菜单：有「首页仪表盘」「我的申报」，无「审核工作台」「管理面板」
+    client.force_login(student)
+    student_html = client.get("/").content.decode("utf-8")
+    assert "首页仪表盘" in student_html
+    assert "我的申报" in student_html
+    assert "审核工作台" not in student_html
+    assert "管理面板" not in student_html
+
+    # 2. 初审人员（团支书）菜单：同时拥有「首页仪表盘」「我的申报」「审核工作台」，无「管理面板」
+    client.force_login(reviewer)
+    reviewer_html = client.get("/").content.decode("utf-8")
+    assert "首页仪表盘" in reviewer_html
+    assert "我的申报" in reviewer_html
+    assert "审核工作台" in reviewer_html
+    assert "管理面板" not in reviewer_html
+
+    # 初审人员同样是在读学生，点开「我的申报」可正常进行项目申报，返回 200，绝不 403
+    rev_apply = client.get("/submissions/apply/")
+    assert rev_apply.status_code == 200
+    assert "社会实践申报" in rev_apply.content.decode("utf-8")
+
+    # 3. 终审人员（管理员/学生骨干）菜单：同时拥有「首页仪表盘」「我的申报」「审核工作台」「管理面板」
+    client.force_login(admin_user)
+    admin_html = client.get("/").content.decode("utf-8")
+    assert "首页仪表盘" in admin_html
+    assert "我的申报" in admin_html
+    assert "审核工作台" in admin_html
+    assert "管理面板" in admin_html
+
+    # 终审人员点开「我的申报」同样可正常进行项目申报，返回 200，绝不 403
+    adm_apply = client.get("/submissions/apply/")
+    assert adm_apply.status_code == 200
+    assert "社会实践申报" in adm_apply.content.decode("utf-8")
+
+
+@pytest.mark.django_db
+def test_reviewer_can_submit_own_declaration(client, activity):
+    """初审人员（团支书）作为在读学生，在申报向导内能正常创建草稿、上传材料并完成申报提交。"""
+    reviewer = User.objects.create_user(
+        username="tzs_declaration_test",
+        password="password123",
+        real_name="李团支书",
+        role=User.Role.REVIEWER,
+        class_name="信安25-1班",
+        must_change_password=False,
+    )
+    client.force_login(reviewer)
+    # 1. 打开我的申报向导
+    resp = client.get("/submissions/apply/")
+    assert resp.status_code == 200
+    assert "社会实践申报" in resp.content.decode("utf-8")
+
+    sub = Submission.objects.get(owner=reviewer, activity=activity)
+    # 2. 保存草稿
+    save_resp = client.post(
+        "/student/submissions/save/",
+        {
+            "activity_id": str(activity.id),
+            "submission_id": str(sub.id),
+            "expected_version": str(sub.version),
+            "project_name": "团支书带队红色宣讲实践",
+            "category": "红色专项",
+            "declaration_type": "individual",
+        },
+    )
+    assert save_resp.status_code == 302
+    sub.refresh_from_db()
+    assert sub.draft_data["project_name"] == "团支书带队红色宣讲实践"
+
+    # 3. 上传必交材料并提交初审
+    seed_mandatory_materials(reviewer, activity)
+    submit_resp = client.post(f"/student/submissions/{sub.id}/submit/")
+    assert submit_resp.status_code == 302
+    sub.refresh_from_db()
+    assert sub.status == Submission.Status.PENDING_FIRST_REVIEW

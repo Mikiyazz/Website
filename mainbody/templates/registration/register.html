@@ -1,215 +1,73 @@
- jiangxinru-register
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>学生注册</title>
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box;font-family:"Microsoft YaHei",sans-serif;}
-        body{background-color:#f5f5f5;display:flex;justify-content:center;align-items:center;height:100vh;}
-        .register-box{background-color:#fff;width:420px;padding:32px;border-radius:12px;box-shadow:0 2px 12px  rgba(0,0,0,0.1);}
-        .register-box h2{text-align:center;margin-bottom:24px;color:#333;}
-        .item{margin-bottom:16px;}
-        .item label {
-            display: block;
-            margin-bottom: 6px;
-            color: #555;
-        }
-        .item input {
-            width: 100%;
-            padding: 10px 12px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 15px;
-        }
-        .item input:focus {
-            outline: none;
-            border-color: #409eff;
-        }
-        button {
-            width: 100%;
-            padding: 11px;
-            background-color: #409eff;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            font-size: 16px;
-            cursor: pointer;
-        }
-        button:hover {
-            background-color: #337ecc;
-        }
-        .rule-tip{
-            color:#666;
-            font-size:12px;
-            margin-top:4px;
-        }
-        .tip{
-            color:red;
-            font-size:12px;
-            margin-top:4px;
-            display:none;
-        }
-    </style>
-</head>
-<body>
-    <div class="register-box">
-        <h2>学生账号注册</h2>
-        <form action="" method="post">
-            <div class="item">
-                <label>学号(8位数字)</label>
-                <input type="text" name="student_id" maxlength="8" pattern="[0-9]{8}" required placeholder="请输入8位学号">
-            </div>
-            <div class="item">
-                <label>真实姓名</label>
-                <input type="text" name="name" required placeholder="请输入真实姓名">
-            </div>
-            <div class="item">
-                <label>班级</label>
-                <input type="text" name="class" required placeholder="例如:计算机类2601">
-            </div>
-            <div class="item">
-                <label>设置密码</label>
-                <input type="password" name="password" id="pwd" required placeholder="设置登录密码">
-                <div class="rule-tip">密码规则:至少六位,必须同时包含数字和字母</div>
-                <div class="tip"id="pwdRuleTip">密码不符合要求！</div>
-            </div>
-            <div class="item">
-                <label>确认密码</label>
-                <input type="password" name="password2" id="pwd2"required placeholder="再次输入密码">
-                <div class="tip"id="errTip">两次输入的密码不一致</div>
-            </div>
-            <button type="submit">提交注册</button>
-        </form>
-    </div>
-    <script>
-     const form = document.getElementById('regForm');
-     const pwd = document.getElementById('pwd');
-     const pwd2 = document.getElementById('pwd2');
-     const errTip = document.getElementById('errTip');
-     const pwdRuleTip = document.getElementById('pwdRuleTip');
-
-function checkPwdStrong(password){
-    if(password.length <6) return false;
-    let hasLetter = /[a-zA-Z]/.test(password);
-    let hasNumber = /[0-9]/.test(password);
-    return hasLetter && hasNumber;
-}
-pwd.onblur = function(){
-    pwdRuleTip.style.display = 'none';
-    if(this.value && !checkPwdStrong(this.value)){
-        pwdRuleTip.style.display = 'block';
-    }
-}
-pwd.oninput = function(){
-    pwdRuleTip.style.display = 'none';
-}
-pwd2.oninput = function(){
-    errTip.style.display = 'none';
-    const mainPwd = pwd.value;
-    const rePwd = this.value;
-    if(mainPwd === "") return;
-    let isSame = true;
-    for(let i = 0; i < rePwd.length; i++){
-        if(rePwd[i] !== mainPwd[i]){
-            isSame = false;
-            break;
-        }
-    }
-    if(!isSame){
-        errTip.style.display = 'block';
-    }
-}
-form.onsubmit = function(e){
-    errTip.style.display = 'none';
-    pwdRuleTip.style.display = 'none';
-    let pass = true;
-    if(!checkPwdStrong(pwd.value)){
-        pwdRuleTip.style.display = 'block';
-        pass = false;
-    }
-    if(pwd.value !== pwd2.value){
-        errTip.style.display = 'block';
-        pass = false;
-    }
-    if(!pass){
-        e.preventDefault();
-    }
-}
-</script>
-</body>
-</html>
-
 {% extends "base.html" %}
 {% block title %}学生自主注册 · 学院社会实践材料平台{% endblock %}
 {% block content %}
-<section class="card narrow" style="max-width:600px;">
-  <p class="eyebrow">学院社会实践 · 学生账号开通</p>
-  <h1>学生自主注册</h1>
-  <p>请准确填写本人学籍信息完成注册。注册后角色固定为学生账号。</p>
+<div class="card card-md" style="max-width: 600px; margin: 0 auto;">
+  <div class="card-body">
+    <div class="text-uppercase text-secondary fs-5 fw-bold mb-1">学院社会实践 · 学生账号开通</div>
+    <h1 class="h2 mb-2">学生自主注册</h1>
+    <p class="text-secondary mb-3">请准确填写本人学籍信息完成注册。注册后角色固定为学生账号。</p>
 
-  <div class="hint-box">
-    <strong>默认初始密码规则说明：</strong>
-    若下方密码栏留空，系统将自动以您的<strong>学号后 6 位</strong>作为初始登录密码；若您自行填写密码，长度须不少于 6 位。首次登录后系统将在顶部提醒您完成首次改密。
+    <div class="alert alert-info mb-3 hint-box" role="alert">
+      <strong>默认初始密码规则说明：</strong>
+      若下方密码栏留空，系统将自动以您的<strong>学号后 6 位</strong>作为初始登录密码；若您自行填写密码，长度须不少于 6 位。首次登录后系统将在顶部提醒您完成首次改密。
+    </div>
+
+    {% if error_message %}
+    <div class="alert alert-important alert-danger alert-error mb-3" id="register-error" role="alert">{{ error_message }}</div>
+    {% endif %}
+
+    <form method="post" action="{% url 'register-page' %}" id="regForm">
+      {% csrf_token %}
+      <div class="row g-2 mb-3">
+        <div class="col-sm-6 form-row">
+          <label class="form-label required" for="reg_student_number">学号 <span style="color:#c92a2a;">*</span></label>
+          <input type="text" class="form-control" name="student_number" id="reg_student_number" required minlength="6" placeholder="例如：2025080901" value="{{ form_data.student_number|default:'' }}">
+        </div>
+        <div class="col-sm-6 form-row">
+          <label class="form-label required" for="reg_real_name">姓名 <span style="color:#c92a2a;">*</span></label>
+          <input type="text" class="form-control" name="real_name" id="reg_real_name" required placeholder="请输入真实姓名" value="{{ form_data.real_name|default:'' }}">
+        </div>
+      </div>
+
+      <div class="row g-2 mb-3">
+        <div class="col-sm-6 form-row">
+          <label class="form-label required" for="reg_grade">年级 <span style="color:#c92a2a;">*</span></label>
+          <select class="form-select" name="grade" id="reg_grade" required>
+            <option value="">-- 请选择年级 --</option>
+            <option value="大一" {% if form_data.grade == '大一' %}selected{% endif %}>大一</option>
+            <option value="大二" {% if form_data.grade == '大二' %}selected{% endif %}>大二</option>
+            <option value="大三" {% if form_data.grade == '大三' %}selected{% endif %}>大三</option>
+            <option value="大四" {% if form_data.grade == '大四' %}selected{% endif %}>大四</option>
+            <option value="研究生" {% if form_data.grade == '研究生' %}selected{% endif %}>研究生</option>
+          </select>
+        </div>
+        <div class="col-sm-6 form-row">
+          <label class="form-label required" for="reg_major">专业 <span style="color:#c92a2a;">*</span></label>
+          <input type="text" class="form-control" name="major" id="reg_major" required placeholder="例如：信息安全 / 计算机科学与技术" value="{{ form_data.major|default:'' }}">
+        </div>
+      </div>
+
+      <div class="row g-2 mb-3">
+        <div class="col-sm-6 form-row">
+          <label class="form-label required" for="reg_class_name">班级 <span style="color:#c92a2a;">*</span></label>
+          <input type="text" class="form-control" name="class_name" id="reg_class_name" required placeholder="例如：信安25-1班" value="{{ form_data.class_name|default:'' }}">
+        </div>
+        <div class="col-sm-6 form-row">
+          <label class="form-label required" for="reg_phone">手机号 <span style="color:#c92a2a;">*</span></label>
+          <input type="tel" class="form-control" name="phone" id="reg_phone" required placeholder="请输入11位常用手机号" value="{{ form_data.phone|default:'' }}">
+        </div>
+      </div>
+
+      <div class="mb-3 form-row">
+        <label class="form-label" for="reg_password">登录密码（选填，留空则默认设为学号后 6 位）</label>
+        <input type="password" class="form-control" name="password" id="reg_password" autocomplete="new-password" placeholder="留空默认使用学号后6位；自定义密码需至少6位">
+      </div>
+
+      <div class="form-footer d-flex gap-2 mt-4">
+        <button type="submit" class="btn btn-primary flex-fill" style="flex:1;">立即注册并登录</button>
+        <a class="btn btn-outline-secondary quiet" href="{% url 'login' %}">返回登录页</a>
+      </div>
+    </form>
   </div>
-
-  {% if error_message %}
-  <div class="alert-error" id="register-error" role="alert">{{ error_message }}</div>
-  {% endif %}
-
-  <form method="post" action="{% url 'register-page' %}" id="student-register-form">
-    {% csrf_token %}
-    <div class="grid">
-      <div class="form-row">
-        <label for="reg_student_number">学号 <span style="color:#c92a2a;">*</span></label>
-        <input type="text" name="student_number" id="reg_student_number" required minlength="6" placeholder="例如：2025080901" value="{{ form_data.student_number|default:'' }}">
-      </div>
-      <div class="form-row">
-        <label for="reg_real_name">姓名 <span style="color:#c92a2a;">*</span></label>
-        <input type="text" name="real_name" id="reg_real_name" required placeholder="请输入真实姓名" value="{{ form_data.real_name|default:'' }}">
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="form-row">
-        <label for="reg_grade">年级 <span style="color:#c92a2a;">*</span></label>
-        <select name="grade" id="reg_grade" required>
-          <option value="">-- 请选择年级 --</option>
-          <option value="大一" {% if form_data.grade == '大一' %}selected{% endif %}>大一</option>
-          <option value="大二" {% if form_data.grade == '大二' %}selected{% endif %}>大二</option>
-          <option value="大三" {% if form_data.grade == '大三' %}selected{% endif %}>大三</option>
-          <option value="大四" {% if form_data.grade == '大四' %}selected{% endif %}>大四</option>
-          <option value="研究生" {% if form_data.grade == '研究生' %}selected{% endif %}>研究生</option>
-        </select>
-      </div>
-      <div class="form-row">
-        <label for="reg_major">专业 <span style="color:#c92a2a;">*</span></label>
-        <input type="text" name="major" id="reg_major" required placeholder="例如：信息安全 / 计算机科学与技术" value="{{ form_data.major|default:'' }}">
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="form-row">
-        <label for="reg_class_name">班级 <span style="color:#c92a2a;">*</span></label>
-        <input type="text" name="class_name" id="reg_class_name" required placeholder="例如：信安25-1班" value="{{ form_data.class_name|default:'' }}">
-      </div>
-      <div class="form-row">
-        <label for="reg_phone">手机号 <span style="color:#c92a2a;">*</span></label>
-        <input type="tel" name="phone" id="reg_phone" required placeholder="请输入11位常用手机号" value="{{ form_data.phone|default:'' }}">
-      </div>
-    </div>
-
-    <div class="form-row">
-      <label for="reg_password">登录密码（选填，留空则默认设为学号后 6 位）</label>
-      <input type="password" name="password" id="reg_password" autocomplete="new-password" placeholder="留空默认使用学号后6位；自定义密码需至少6位">
-    </div>
-
-    <div class="action-bar">
-      <button type="submit" style="flex:1;">立即注册并登录</button>
-      <a class="btn quiet" href="{% url 'login' %}">返回登录页</a>
-    </div>
-  </form>
-</section>
+</div>
 {% endblock %}
- main

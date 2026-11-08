@@ -91,8 +91,19 @@ FILE_UPLOAD_HANDLERS = [
 ]
 MAX_FILE_BYTES = min(env.int("MAX_FILE_BYTES", default=10_000_000_000), 10_000_000_000)
 UPLOAD_PART_BYTES = env.int("UPLOAD_PART_BYTES", default=32 * 1024 * 1024)
+# 浏览器分片上传的单片大小；服务端下发为准，硬顶 5MB（见 apps/uploads/policies.chunk_size_bytes）。
+UPLOAD_CHUNK_BYTES = env.int("UPLOAD_CHUNK_BYTES", default=5 * 1024 * 1024)
 MAX_ACTIVE_UPLOADS_PER_USER = env.int("MAX_ACTIVE_UPLOADS_PER_USER", default=2)
 STORAGE_BACKEND = env("STORAGE_BACKEND", default="disabled")
+
+# 审计来源 IP：默认只取 REMOTE_ADDR；部署在可信反向代理后才打开，且逐跳做 IP 校验。
+TRUST_X_FORWARDED_FOR = env.bool("TRUST_X_FORWARDED_FOR", default=False)
+# 视频容器探测：ffprobe 可执行文件名或绝对路径。找不到时降级为"扩展名+大小"并打 warning。
+UPLOAD_FFPROBE_BIN = env("UPLOAD_FFPROBE_BIN", default="ffprobe")
+# ZIP 安全闸（other_materials 允许 .zip）：解压后总大小 200MB、条目数 200、嵌套深度 1。
+ARCHIVE_MAX_TOTAL_BYTES = 200 * 1024 * 1024
+ARCHIVE_MAX_ENTRIES = 200
+ARCHIVE_MAX_DEPTH = 1
 
 CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://127.0.0.1:6379/0")
 CELERY_ACCEPT_CONTENT = ["json"]

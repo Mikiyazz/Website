@@ -1,11 +1,14 @@
 """Export services: Excel summary generation and streaming class-based ZIP packaging."""
 from pathlib import Path
+import logging
 import re
 import shutil
 import tempfile
+import time
 import uuid
 import zipfile
 import openpyxl
+from django.conf import settings
 from django.utils import timezone
 from apps.accounts.models import User
 from apps.accounts.permissions import is_college_admin
@@ -336,3 +339,273 @@ def export_class_zip_stream(*, actor, activity_id, class_name: str, status: str 
         },
     )
     return tmp_file, download_filename
+
+# =====================================================================
+# 异步导出（Celery）：按学生目录 + 材料类型中文名归档，流式写入 ZIP
+# =====================================================================
+
+EXPORT_ROOT_DIRNAME = "exports"
+# 单个文件超过 20MB（典型是宣讲视频）改用 STORED，避免 worker 把 CPU 花在 deflate 上；
+# 无论哪种压缩方式，拷贝都按 STREAM_CHUNK_BYTES 分块，绝不整文件 read()。
+EXPORT_STORED_THRESHOLD_BYTES = 20 * 1024 * 1024
+EXPORT_PROGRESS_FLUSH_BYTES = 4 * 1024 * 1024
+EXPORT_PROGRESS_FLUSH_SECONDS = 0.5
+
+
+def export_relative_dir(activity_id) -> str:
+    return f"{EXPORT_ROOT_DIRNAME}/{activity_id}"
+
+
+def export_absolute_dir(activity_id) -> Path:
+    target = Path(settings.MEDIA_ROOT) / EXPORT_ROOT_DIRNAME / str(activity_id)
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _material_title(code: str, fallback: str) -> str:
+    spec = STANDARD_MATERIAL_RULES.get(str(code or ""))
+    raw = (spec or {}).get("title") or fallback or code or "附件"
+    return sanitize_filename(raw, default="附件")
+
+
+def _student_dir_name(submission: Submission) -> str:
+    student_number = sanitize_filename(submission.owner.username, default="未知学号")
+    real_name = sanitize_filename(submission.owner.real_name or submission.owner.username, default="未知姓名")
+    return f"{student_number}_{real_name}"
+
+
+def build_export_entries(*, activity: Activity, allowed_classes=None) -> list[dict]:
+    """Collect (source file, archive name, size) tuples for one activity without touching bytes."""
+    submissions = list(
+        Submission.objects.filter(activity=activity)
+        .select_related("owner")
+        .order_by("owner__class_name", "owner__username", "created_at")
+    )
+    if allowed_classes:
+        allowed = {str(item).strip() for item in allowed_classes if str(item).strip()}
+        submissions = [sub for sub in submissions if str(sub.owner.class_name or "").strip() in allowed]
+
+    owner_ids = [sub.owner_id for sub in submissions]
+    uploads_by_owner: dict[int, list[UploadSession]] = {}
+    if owner_ids:
+        uploads = (
+            UploadSession.objects.select_related("requirement", "fileasset")
+            .filter(
+                owner_id__in=owner_ids,
+                requirement__activity=activity,
+                status=UploadSession.Status.COMPLETE,
+                fileasset__status=FileAsset.Status.VALID,
+            )
+            .order_by("created_at", "id")
+        )
+        for upload in uploads:
+            uploads_by_owner.setdefault(upload.owner_id, []).append(upload)
+
+    entries: list[dict] = []
+    used_arcnames: set[str] = set()
+    for submission in submissions:
+        student_dir = _student_dir_name(submission)
+        prefix = "late_" if submission.is_late_submission else ""
+        for upload in uploads_by_owner.get(submission.owner_id, []):
+            try:
+                source_path = resolve_file_disk_path(upload.object_key)
+            except DomainError:
+                continue
+            if not source_path.exists() or not source_path.is_file():
+                continue
+            try:
+                size = source_path.stat().st_size
+            except OSError:
+                continue
+
+            category = _material_title(upload.requirement.code, upload.requirement.title)
+            stem = sanitize_filename(Path(upload.original_name).stem, default="附件")
+            extension = Path(upload.original_name).suffix.lower() or source_path.suffix.lower()
+            filename = sanitize_filename(f"{prefix}{stem}{extension}", default="附件")
+
+            arcname = f"{student_dir}/{category}/{filename}"
+            if arcname in used_arcnames:
+                suffix = 2
+                while f"{student_dir}/{category}/{prefix}{stem}_{suffix}{extension}" in used_arcnames:
+                    suffix += 1
+                filename = sanitize_filename(f"{prefix}{stem}_{suffix}{extension}", default="附件")
+                arcname = f"{student_dir}/{category}/{filename}"
+            used_arcnames.add(arcname)
+            entries.append(
+                {
+                    "arcname": arcname,
+                    "source_path": source_path,
+                    "size": size,
+                    "submission_id": str(submission.id),
+                    "is_late": submission.is_late_submission,
+                }
+            )
+
+    entries.sort(key=lambda item: item["arcname"])
+    return entries
+
+
+class _ExportProgress:
+    """Throttled progress writer: at most one UPDATE per 4MB or 0.5s."""
+
+    def __init__(self, job_id, total_bytes: int):
+        self.job_id = job_id
+        self.total_bytes = total_bytes
+        self.current_bytes = 0
+        self._pending_bytes = 0
+        self._last_flush = time.monotonic()
+
+    def add(self, byte_count: int) -> None:
+        self.current_bytes += byte_count
+        self._pending_bytes += byte_count
+        if (
+            self._pending_bytes >= EXPORT_PROGRESS_FLUSH_BYTES
+            or time.monotonic() - self._last_flush >= EXPORT_PROGRESS_FLUSH_SECONDS
+        ):
+            self.flush()
+
+    def flush(self) -> None:
+        ExportJob.objects.filter(pk=self.job_id).update(
+            current=self.current_bytes,
+            total=self.total_bytes,
+            updated_at=timezone.now(),
+        )
+        self._pending_bytes = 0
+        self._last_flush = time.monotonic()
+
+
+def _write_zip_entry(zf: zipfile.ZipFile, entry: dict, progress: _ExportProgress) -> None:
+    """Stream one file into the archive; large media goes in STORED to keep worker memory flat."""
+    source_path: Path = entry["source_path"]
+    info = zipfile.ZipInfo.from_file(source_path, entry["arcname"])
+    info.compress_type = (
+        zipfile.ZIP_STORED if entry["size"] >= EXPORT_STORED_THRESHOLD_BYTES else zipfile.ZIP_DEFLATED
+    )
+    info.flag_bits |= 0x800  # UTF-8 file name flag
+    with open(source_path, "rb") as source_stream, zf.open(info, "w") as dest_stream:
+        while True:
+            chunk = source_stream.read(STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            dest_stream.write(chunk)
+            progress.add(len(chunk))
+
+
+def create_activity_export_job(*, actor, activity_id) -> ExportJob:
+    """Create a pending ExportJob after permission checks; celery task owns the heavy lifting."""
+    try:
+        activity = Activity.objects.get(pk=_parse_activity_uuid(activity_id))
+    except Activity.DoesNotExist:
+        raise DomainError("导出失败：活动不存在或已被删除。") from None
+    allowed_classes = require_export_permission(actor, activity)
+    job = ExportJob.objects.create(
+        requested_by=actor,
+        activity=activity,
+        status=ExportJob.Status.PENDING,
+        filters={
+            "type": "activity_zip",
+            "classes": list(allowed_classes or []),
+            "scope": "activity",
+        },
+    )
+    record(
+        actor=actor,
+        action="export.activity.started",
+        target=job,
+        metadata={"activity_id": str(activity.id), "job_id": str(job.id), "classes": list(allowed_classes or [])},
+    )
+    return job
+
+
+def run_activity_export_job(job_id) -> ExportJob:
+    """Build MEDIA_ROOT/exports/{activity_id}/{uuid}.zip with DB-backed progress."""
+    job = ExportJob.objects.select_related("activity", "requested_by").get(pk=job_id)
+    activity = job.activity
+    now = timezone.now()
+    ExportJob.objects.filter(pk=job.pk).update(
+        status=ExportJob.Status.RUNNING, started_at=now, total=0, current=0, updated_at=now
+    )
+
+    try:
+        filters = job.filters or {}
+        allowed_classes = filters.get("classes") or None
+        entries = build_export_entries(activity=activity, allowed_classes=allowed_classes)
+        total_bytes = sum(int(entry["size"]) for entry in entries)
+        ExportJob.objects.filter(pk=job.pk).update(
+            total=total_bytes,
+            current=0,
+            filters={**filters, "file_count": len(entries)},
+            updated_at=timezone.now(),
+        )
+
+        export_dir = export_absolute_dir(activity.id)
+        zip_name = f"{uuid.uuid4().hex}.zip"
+        zip_path = export_dir / zip_name
+        relative_path = f"{export_relative_dir(activity.id)}/{zip_name}"
+
+        progress = _ExportProgress(job.pk, total_bytes)
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            for entry in entries:
+                _write_zip_entry(zf, entry, progress)
+        progress.flush()
+
+        download_name = sanitize_filename(activity.title, default="活动")
+        finished = timezone.now()
+        ExportJob.objects.filter(pk=job.pk).update(
+            status=ExportJob.Status.DONE,
+            file_path=relative_path,
+            result_key=f"{download_name}-全院归档材料.zip",
+            current=total_bytes,
+            total=total_bytes,
+            finished_at=finished,
+            error_code="",
+            updated_at=finished,
+        )
+        record(
+            actor=job.requested_by,
+            action="export.activity.done",
+            target=job,
+            metadata={
+                "activity_id": str(activity.id),
+                "file_count": len(entries),
+                "total_bytes": total_bytes,
+                "file_path": relative_path,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - 任务失败也必须落库，页面才能显示原因
+        logging.getLogger(__name__).exception("export_activity_failed", extra={"job_id": str(job.pk)})
+        failed_at = timezone.now()
+        ExportJob.objects.filter(pk=job.pk).update(
+            status=ExportJob.Status.FAILED,
+            error_code=type(exc).__name__[:100],
+            finished_at=failed_at,
+            updated_at=failed_at,
+        )
+        record(
+            actor=job.requested_by,
+            action="export.activity.failed",
+            target=job,
+            metadata={"activity_id": str(activity.id), "error_type": type(exc).__name__},
+        )
+
+    return ExportJob.objects.get(pk=job.pk)
+
+
+def serialize_export_job(job: ExportJob) -> dict:
+    return {
+        "job_id": str(job.id),
+        "activity_id": str(job.activity_id),
+        "activity_title": job.activity.title if job.activity_id else "",
+        "status": job.status,
+        "status_display": job.get_status_display(),
+        "total": job.total,
+        "current": job.current,
+        "percent": job.percent,
+        "file_count": int((job.filters or {}).get("file_count") or 0),
+        "file_path": job.file_path,
+        "error_code": job.error_code,
+        "result_key": job.result_key,
+        "created_at": job.created_at.isoformat(),
+        "finished_at": job.finished_at.isoformat() if job.finished_at else "",
+        "download_url": f"/api/v1/exports/{job.id}/download/" if job.status == ExportJob.Status.DONE else "",
+    }

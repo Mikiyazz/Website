@@ -1,0 +1,313 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}社会实践申报 · 学院社会实践材料平台{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'vendor/filepond/filepond.min.css' %}">
+<link rel="stylesheet" href="{% static 'vendor/filepond/plugins/filepond-plugin-image-preview.min.css' %}">
+<link rel="stylesheet" href="{% static 'vendor/filepond/plugins/filepond-plugin-file-poster.min.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="page-header d-print-none mb-3">
+  <div class="row g-2 align-items-center">
+    <div class="col">
+      <div class="page-pretitle">社会实践</div>
+      <h2 class="page-title">社会实践申报</h2>
+    </div>
+    <div class="col-auto ms-auto d-print-none">
+      <div class="btn-list">
+        {% if open_activities|length > 1 %}
+        <form method="get" class="d-flex align-items-center gap-2">
+          <label class="form-label mb-0 text-secondary" for="activity-switcher">申报活动</label>
+          <select class="form-select" id="activity-switcher" name="activity_id" onchange="this.form.submit()">
+            {% for activity in open_activities %}
+            <option value="{{ activity.id }}" {% if selected_activity and activity.id == selected_activity.id %}selected{% endif %}>{{ activity.title }}</option>
+            {% endfor %}
+          </select>
+        </form>
+        {% endif %}
+        <a class="btn btn-outline-secondary" href="{{ workbench_url }}">返回工作台</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 上传进度：上传中常显；全部完成后自动收起 -->
+<div class="upload-progress-bar d-none mb-3" id="upload-progress-bar" role="status" aria-live="polite">
+  <div class="d-flex justify-content-between align-items-center mb-1">
+    <span class="text-secondary small" id="upload-progress-label">正在上传…</span>
+    <span class="text-secondary small" id="upload-progress-percent">0%</span>
+  </div>
+  <div class="progress progress-sm" role="progressbar" aria-label="附件上传总进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="upload-progress-track">
+    <div class="progress-bar bg-primary" id="upload-progress-fill" style="width: 0%"></div>
+  </div>
+  <div class="form-hint mt-1" id="upload-progress-hint">上传过程中请勿关闭页面；断线后重新选择同一文件可断点续传。</div>
+</div>
+
+{% if not selected_activity %}
+<div class="alert alert-warning" role="alert" id="no-open-activity">
+  <div class="d-flex">
+    <div>
+      <h4 class="alert-title">当前没有开放中的申报活动</h4>
+      <div class="text-secondary">活动尚未开放、已截止或未向你的班级开放，暂时无法填写申报。请返回工作台查看活动窗口或联系指导老师。</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if error_message %}
+<div class="alert alert-danger" role="alert" id="apply-error-banner">{{ error_message }}</div>
+{% endif %}
+
+{% if is_locked %}
+<div class="alert alert-warning" role="alert" id="apply-locked-banner" data-readonly-locked="true">
+  <h4 class="alert-title">申报已锁定</h4>
+  <div class="text-secondary">{{ lock_reason }}</div>
+</div>
+{% endif %}
+
+<div class="card" id="apply-wizard"
+     data-activity-id="{% if selected_activity %}{{ selected_activity.id }}{% endif %}"
+     data-submit-url="{{ submit_url }}"
+     data-detail-url="{{ detail_url }}"
+     data-success-url="{{ success_url }}"
+     data-lookup-url="{{ lookup_url }}"
+     data-chunk-start-url="{% url 'upload-chunk-start' %}"
+     data-chunk-upload-url="{% url 'upload-chunk-upload' %}"
+     data-chunk-complete-url="{% url 'upload-chunk-complete' %}"
+     data-direct-upload-url="{% url 'upload-direct' %}"
+     data-upload-locked="{{ is_locked|yesno:'true,false' }}"
+     data-can-submit="{{ can_submit|yesno:'true,false' }}">
+  <input type="hidden" id="apply-csrf-token" value="{{ csrf_token }}">
+  <div class="card-header">
+    <div class="steps steps-counter w-100" id="wizard-steps">
+      <a href="#step-1" class="step-item active" data-step-target="1" aria-current="step">项目信息</a>
+      <a href="#step-2" class="step-item" data-step-target="2">团队成员</a>
+      <a href="#step-3" class="step-item" data-step-target="3">附件上传</a>
+      <a href="#step-4" class="step-item" data-step-target="4">确认提交</a>
+    </div>
+  </div>
+
+  <div class="card-body">
+    <!-- ============ Step 1 项目信息 ============ -->
+    <section class="wizard-panel" id="step-1" data-step="1">
+      <h3 class="card-title mb-3">Step 1 · 项目信息</h3>
+      <div class="row">
+        <div class="col-lg-6">
+          <div class="mb-3">
+            <label class="form-label required" for="field-project-name">项目名称</label>
+            <input type="text" class="form-control" id="field-project-name" name="project_name"
+                   maxlength="200" placeholder="例如：矿区网络安全科普宣讲实践"
+                   value="{{ draft_data.project_name }}" required>
+            <div class="invalid-feedback" id="error-project-name">请填写项目名称。</div>
+          </div>
+        </div>
+        <div class="col-lg-6">
+          <div class="mb-3">
+            <label class="form-label required" for="field-advisor">指导老师</label>
+            <input type="text" class="form-control" id="field-advisor" name="advisor_name"
+                   maxlength="100" placeholder="填写指导老师姓名" required>
+            <div class="invalid-feedback" id="error-advisor">请填写指导老师姓名。</div>
+          </div>
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label required" for="field-place">实践地点</label>
+        <input type="text" class="form-control" id="field-place" name="practice_place"
+               maxlength="200" placeholder="例如：江苏省徐州市贾汪区潘安湖街道" required>
+        <div class="invalid-feedback" id="error-place">请填写实践地点。</div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label required">起止日期</label>
+        <div class="row g-2 align-items-center">
+          <div class="col-auto">
+            <input type="date" class="form-control" id="field-date-start" name="date_start" required>
+          </div>
+          <div class="col-auto text-secondary">至</div>
+          <div class="col-auto">
+            <input type="date" class="form-control" id="field-date-end" name="date_end" required>
+          </div>
+          <div class="col-auto">
+            <span class="form-hint" id="date-span-hint"></span>
+          </div>
+        </div>
+        <div class="invalid-feedback d-block text-danger small d-none" id="error-date">截止日期不能早于开始日期。</div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label" for="field-intro">项目简介</label>
+        <textarea class="form-control" id="field-intro" name="project_intro" rows="4"
+                  maxlength="2000" placeholder="简要说明实践主题、内容与预期成果（2000 字以内）"></textarea>
+        <div class="form-hint">选填。建议 200～800 字，便于审核老师快速了解项目内容。</div>
+      </div>
+    </section>
+
+    <!-- ============ Step 2 团队成员 ============ -->
+    <section class="wizard-panel d-none" id="step-2" data-step="2">
+      <h3 class="card-title mb-3">Step 2 · 团队成员</h3>
+      <div class="mb-3">
+        <label class="form-label required">申报模式</label>
+        <div class="form-selectgroup">
+          <label class="form-selectgroup-item">
+            <input type="radio" name="declaration_type" id="radio_decl_individual" value="individual"
+                   class="form-selectgroup-input" {% if draft_data.declaration_type != "team" %}checked{% endif %}>
+            <span class="form-selectgroup-label">个人申报</span>
+          </label>
+          <label class="form-selectgroup-item">
+            <input type="radio" name="declaration_type" id="radio_decl_team" value="team"
+                   class="form-selectgroup-input" {% if draft_data.declaration_type == "team" %}checked{% endif %}>
+            <span class="form-selectgroup-label">团队申报</span>
+          </label>
+        </div>
+        <div class="form-hint">团队申报请逐个添加队员学号，系统会自动带出姓名。</div>
+      </div>
+
+      <div id="step-2-body">
+        <div class="alert alert-info" id="individual-notice">
+          个人申报无需成员。
+        </div>
+
+        <div id="team-block">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <span class="text-secondary">团队成员（不含本人）</span>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="btn-add-member">
+              添加队员
+            </button>
+          </div>
+          <div id="team-members" class="d-flex flex-column gap-2"></div>
+          <div class="form-hint mt-2">学号失焦后自动查询姓名；未查询到姓名的队员无法提交。</div>
+          <template id="team-member-template">
+            <div class="row g-2 align-items-center team-member-row">
+              <div class="col-12 col-md-5">
+                <input type="text" class="form-control member-student-number" inputmode="numeric"
+                       maxlength="32" placeholder="学号" autocomplete="off">
+              </div>
+              <div class="col-12 col-md-5">
+                <input type="text" class="form-control member-real-name" placeholder="姓名（自动带出）" readonly>
+                <div class="invalid-feedback d-block small d-none member-lookup-error">未查询到该学号的在校学生。</div>
+              </div>
+              <div class="col-12 col-md-2 text-md-end">
+                <button type="button" class="btn btn-outline-danger btn-sm member-remove" aria-label="移除该队员">
+                  删除
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Step 3 附件上传 ============ -->
+    <section class="wizard-panel d-none" id="step-3" data-step="3">
+      <h3 class="card-title mb-3">Step 3 · 附件上传</h3>
+      <div class="row row-cards">
+        {% for material in materials %}
+        <div class="col-12 col-xl-{% if material.is_image_zone or material.code == "other_materials" %}6{% else %}12{% endif %}">
+          <div class="card mb-0 h-100" data-material-card="{{ material.code }}">
+            <div class="card-header">
+              <h4 class="card-title">
+                {{ material.title }}
+                {% if material.required %}
+                <span class="badge bg-red-lt ms-2">必交</span>
+                {% else %}
+                <span class="badge bg-secondary-lt ms-2">选交</span>
+                {% endif %}
+              </h4>
+              <div class="card-actions text-secondary small" data-material-limit="{{ material.code }}">
+                {{ material.limit_label }}
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="mb-2 text-secondary small">
+                {{ material.count_hint }} · 允许 {{ material.allowed_extensions|join:" / " }}
+              </div>
+              <input type="file"
+                     class="filepond-zone"
+                     id="pond-{{ material.code }}"
+                     name="{{ material.code }}"
+                     data-material-code="{{ material.code }}"
+                     aria-label="{{ material.title }} 上传区">
+              <div class="form-hint mt-2" data-material-hint="{{ material.code }}">
+                {% if material.code == "scene_photos" %}至少 3 张、最多 5 张现场照片，单张 ≤ 10MB。{% endif %}
+                {% if material.code == "application_form" %}仅接受 .docx 申报表，单份 ≤ 20MB。{% endif %}
+                {% if material.code == "practice_report" %}仅接受 .pdf 实践报告，单份 ≤ 20MB。{% endif %}
+                {% if material.code == "video" %}选交，.mp4 / .mov / .avi / .mkv，单份 ≤ 300MB。{% endif %}
+                {% if material.code == "other_materials" %}选交，最多 10 份（其中 ZIP 打包材料最多 5 份）；普通材料单份 ≤ 50MB，ZIP 打包材料单份 ≤ 2000MB。{% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="alert alert-info mt-3 mb-0" role="alert" id="upload-strategy-note">
+        宣讲视频走 5MB 分片上传：单片上传完立即释放连接，中途断网或关闭标签页后重新选择同一文件即可从已上传的分片继续，不会从头再传 300MB。
+        其余材料（≤50MB）仍走单请求直传。
+      </div>
+    </section>
+
+    <!-- ============ Step 4 确认提交 ============ -->
+    <section class="wizard-panel d-none" id="step-4" data-step="4">
+      <h3 class="card-title mb-3">Step 4 · 确认提交</h3>
+
+      <div class="mb-4">
+        <h4 class="mb-2">项目信息</h4>
+        <div class="card">
+          <div class="card-body">
+            <dl class="row mb-0" id="summary-project">
+              <dt class="col-4 col-md-3 text-secondary">项目名称</dt><dd class="col-8 col-md-9" data-summary="project_name">—</dd>
+              <dt class="col-4 col-md-3 text-secondary">指导老师</dt><dd class="col-8 col-md-9" data-summary="advisor_name">—</dd>
+              <dt class="col-4 col-md-3 text-secondary">实践地点</dt><dd class="col-8 col-md-9" data-summary="practice_place">—</dd>
+              <dt class="col-4 col-md-3 text-secondary">起止日期</dt><dd class="col-8 col-md-9" data-summary="date_range">—</dd>
+              <dt class="col-4 col-md-3 text-secondary">项目简介</dt><dd class="col-8 col-md-9 text-pre-wrap" data-summary="project_intro">—</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+
+      <div class="mb-4">
+        <h4 class="mb-2">申报模式与成员</h4>
+        <div class="card">
+          <div class="card-body" id="summary-team">—</div>
+        </div>
+      </div>
+
+      <div class="mb-4">
+        <h4 class="mb-2">材料清单</h4>
+        <div class="row row-cards" id="summary-materials"></div>
+      </div>
+
+      <div class="alert alert-danger d-none" id="submit-error" role="alert"></div>
+
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span class="text-secondary small" id="submit-readiness">请核对以上信息，确认无误后点击提交。</span>
+        <button type="button" class="btn btn-primary" id="btn-confirm-submit" {% if not can_submit %}disabled{% endif %}>
+          确认提交
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <div class="card-footer d-flex justify-content-between align-items-center">
+    <button type="button" class="btn btn-outline-secondary" id="btn-prev" disabled>上一步</button>
+    <span class="text-secondary small" id="step-indicator">第 1 / 4 步</span>
+    <button type="button" class="btn btn-primary" id="btn-next">下一步</button>
+  </div>
+</div>
+
+<script type="application/json" id="wizard-materials-json">{{ materials_json|safe }}</script>
+<script type="application/json" id="wizard-team-json">{{ team_members_json|safe }}</script>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'vendor/filepond/filepond.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-validate-type.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-validate-size.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-image-validate-size.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-image-preview.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-image-exif-orientation.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-poster.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-metadata.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/locale/zh-cn.global.js' %}"></script>
+<script src="{% static 'js/apply-wizard.js' %}"></script>
+{% endblock %}

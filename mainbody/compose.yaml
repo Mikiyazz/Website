@@ -10,6 +10,9 @@ x-app: &app
     CACHE_URL: redis://redis:6379/1
   init: true
   restart: unless-stopped
+  # 学生材料必须被 web、dispatcher、worker 共同看到：分片回收和文件校验都要读到真实文件，
+  # 否则 dispatcher 只能改数据库、删不掉别人容器里的字节。
+  volumes: ["media_data:/app/media"]
   pids_limit: 128
   security_opt: ["no-new-privileges:true"]
   cap_drop: ["ALL"]
@@ -95,3 +98,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  media_data:

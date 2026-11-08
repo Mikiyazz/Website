@@ -1,19 +1,15 @@
 import os
-from datetime import timedelta
 import pytest
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.utils import timezone
 from config.settings import base as base_settings
 from apps.accounts.models import User
-from apps.activities.models import Activity
-from apps.common.errors import Conflict, DomainError
+from apps.common.errors import DomainError
 from apps.reviews.models import ReviewAssignment
 from apps.submissions.models import Submission
 from apps.submissions.services import create_draft, save_draft, submit_for_review
 from apps.uploads.models import FileAsset, StorageQuota, UploadSession
 from apps.uploads.policies import (
-    STANDARD_MATERIAL_RULES,
     validate_filename_and_extension,
     validate_magic_bytes,
 )
@@ -23,6 +19,7 @@ from apps.uploads.services import (
     ensure_standard_material_requirements,
     resolve_file_disk_path,
 )
+from tests.fixtures.samples import REAL_JPEG, REAL_PNG
 
 
 # =====================================================================
@@ -68,13 +65,13 @@ def test_five_standard_material_rules_configuration(activity):
     assert reqs["scene_photos"].max_count == 5
 
     assert reqs["video"].required is False
-    assert reqs["video"].allowed_extensions == [".mp4"]
+    assert reqs["video"].allowed_extensions == [".mp4", ".mov", ".avi", ".mkv"]
     assert reqs["video"].max_file_bytes == 300 * 1024 * 1024
     assert reqs["video"].max_count == 1
 
     assert reqs["other_materials"].required is False
-    assert reqs["other_materials"].allowed_extensions == [".pdf", ".jpg", ".jpeg", ".png"]
-    assert reqs["other_materials"].max_file_bytes == 20 * 1024 * 1024
+    assert reqs["other_materials"].allowed_extensions == [".pdf", ".jpg", ".jpeg", ".png", ".zip"]
+    assert reqs["other_materials"].max_file_bytes == 50 * 1024 * 1024
 
 
 def test_filename_and_magic_bytes_double_hard_validation(client, student, activity):
@@ -194,7 +191,7 @@ def test_direct_upload_and_overwrite_physically_deletes_old_file(client, student
 def test_explicit_delete_attachment_releases_quota_and_removes_disk_file(student, activity):
     """验证学生显式删除某附件时，释放配额并物理删除磁盘文件。"""
     reqs = ensure_standard_material_requirements(activity)
-    photo_bytes = b"\x89PNG\r\n\x1a\n" + b"png-image-data" * 10
+    photo_bytes = REAL_PNG
     upload, asset, _ = direct_upload(
         actor=student,
         requirement_id=reqs["scene_photos"].id,
@@ -252,7 +249,7 @@ def test_submit_for_review_enforces_mandatory_materials_completeness(student, ac
         direct_upload(
             actor=student,
             requirement_id=reqs["scene_photos"].id,
-            file_obj=SimpleUploadedFile(f"照片_{i}.jpg", b"\xff\xd8\xff\xe0" + b"c" * 50),
+            file_obj=SimpleUploadedFile(f"照片_{i}.jpg", REAL_JPEG),
         )
     with pytest.raises(DomainError, match="现场照片"):
         submit_for_review(actor=student, submission_id=draft.pk)
@@ -261,7 +258,7 @@ def test_submit_for_review_enforces_mandatory_materials_completeness(student, ac
     direct_upload(
         actor=student,
         requirement_id=reqs["scene_photos"].id,
-        file_obj=SimpleUploadedFile("照片_3.png", b"\x89PNG\r\n\x1a\n" + b"d" * 50),
+        file_obj=SimpleUploadedFile("照片_3.png", REAL_PNG),
     )
     sub, rev = submit_for_review(actor=student, submission_id=draft.pk)
     assert sub.status == Submission.Status.PENDING_FIRST_REVIEW

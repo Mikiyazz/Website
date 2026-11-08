@@ -1,0 +1,25 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- 本地运行产物（实际运行时都在 mainbody/ 下，此处兜底根目录）----
+*.sqlite3
+*.log
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- Agent 工具目录（本地状态，不入库）----
+.local/
+.skills/
+.claude/
+.citadel/

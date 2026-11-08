@@ -5,6 +5,7 @@ from django.utils import timezone
 from apps.accounts.models import User
 from apps.activities.models import Activity, MaterialRequirement
 from apps.uploads.services import direct_upload, ensure_standard_material_requirements
+from tests.fixtures.samples import REAL_JPEG
 
 
 @pytest.fixture(autouse=True)
@@ -60,10 +61,11 @@ def seed_mandatory_materials(actor, activity):
         requirement_id=reqs["practice_report"].id,
         file_obj=SimpleUploadedFile("实践报告.pdf", b"%PDF-1.7\n" + b"0" * 64),
     )
+    # 现场照片必须是真的可解析 JPEG：图片结构校验（SOI/SOF/EOI）会拒绝伪造样本。
     for idx in range(1, 4):
         direct_upload(
             actor=actor,
             requirement_id=reqs["scene_photos"].id,
-            file_obj=SimpleUploadedFile(f"现场照片{idx}.jpg", b"\xff\xd8\xff\xe0" + b"\x00" * 64),
+            file_obj=SimpleUploadedFile(f"现场照片{idx}.jpg", REAL_JPEG),
         )
     return reqs

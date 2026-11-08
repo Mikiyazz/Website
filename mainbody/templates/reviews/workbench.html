@@ -1,0 +1,495 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}审核工作台 · 学院社会实践材料平台{% endblock %}
+
+{% block content %}
+<div class="page-header mb-3">
+  <div class="row align-items-center g-2">
+    <div class="col">
+      <div class="page-pretitle">学院社会实践 · 审核端</div>
+      <h2 class="page-title mb-1">审核工作台</h2>
+      <div class="text-secondary small">
+        {{ user.real_name|default:user.username }}（{{ user.username }}）·
+        {% if is_college_admin %}学院管理员{% else %}审核老师{% endif %}
+        {% if selected_activity %}· 当前活动：{{ selected_activity.title }}{% endif %}
+      </div>
+    </div>
+    <div class="col-auto ms-auto">
+      <button type="button"
+              class="btn btn-primary"
+              id="btn-start-export"
+              data-activity-id="{{ selected_activity.id|default:'' }}"
+              data-start-url="{% url 'export-start' %}"
+              {% if not can_export %}disabled title="请先选择一个活动"{% endif %}>
+        批量导出
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 异步导出进度：POST 后每 2 秒轮询 /api/v1/exports/status/<job_id>/ -->
+<div class="card card-pad mb-4" id="export-progress-card" {% if not export_jobs %}hidden{% endif %}>
+  <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+    <div>
+      <h3 class="card-title mb-1" id="export-progress-title">导出任务</h3>
+      <div class="text-secondary small" id="export-progress-meta">等待开始…</div>
+    </div>
+    <span class="badge bg-secondary-lt text-secondary" id="export-progress-badge" data-export-status="pending">等待</span>
+  </div>
+  <div class="progress progress-sm my-3" role="progressbar" aria-label="导出进度"
+       aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="export-progress-wrapper">
+    <div class="progress-bar bg-primary" id="export-progress-bar" style="width: 0%"></div>
+  </div>
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span class="small text-secondary" id="export-progress-percent">0%</span>
+    <div id="export-download-wrap" hidden>
+      <a class="btn btn-sm btn-success" id="export-download-link" href="#">下载 ZIP 归档包</a>
+    </div>
+  </div>
+</div>
+
+<div class="row row-cards mb-1">
+  <div class="col-12">
+    <div class="card card-pad" id="export-jobs-card">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+        <h3 class="card-title mb-0">正在进行的导出任务</h3>
+        <span class="text-secondary small">关闭页面不会中断导出；刷新工作台可继续查看进度。</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-vcenter table-sm mb-0" id="export-jobs-table">
+          <thead>
+            <tr>
+              <th>活动</th>
+              <th>状态</th>
+              <th>进度</th>
+              <th>发起时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for job in export_jobs %}
+            <tr data-export-job="{{ job.id }}">
+              <td>{{ job.activity.title }}</td>
+              <td>
+                <span class="badge {% if job.status == 'done' %}bg-success-lt text-success{% elif job.status == 'failed' %}bg-danger-lt text-danger{% elif job.status == 'running' %}bg-blue-lt text-blue{% else %}bg-secondary-lt text-secondary{% endif %}"
+                      data-job-status="{{ job.status }}">{{ job.get_status_display }}</span>
+              </td>
+              <td>
+                <div class="d-flex align-items-center gap-2" style="min-width: 160px;">
+                  <div class="progress progress-sm flex-grow-1">
+                    <div class="progress-bar" style="width: {{ job.percent }}%"></div>
+                  </div>
+                  <span class="small text-secondary">{{ job.percent }}%</span>
+                </div>
+              </td>
+              <td class="text-secondary small">{{ job.created_at|date:"m-d H:i" }}</td>
+              <td>
+                {% if job.status == 'done' %}
+                <a class="btn btn-sm btn-outline-success" href="{% url 'export-download' job.id %}">下载 ZIP</a>
+                {% elif job.status == 'failed' %}
+                <span class="text-danger small">失败：{{ job.error_code|default:"未知" }}</span>
+                {% else %}
+                <button type="button" class="btn btn-sm btn-outline-secondary js-resume-export" data-job-id="{{ job.id }}">查看进度</button>
+                {% endif %}
+              </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="5" class="text-center text-secondary py-3" id="export-jobs-empty">当前没有导出任务。选择活动后点击右上角“批量导出”。</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 筛选栏：全部服务端过滤（filter_q），不做前端假筛选 -->
+<div class="card mt-3">
+  <div class="card-header">
+    <h3 class="card-title">申报材料审核列表</h3>
+    <div class="card-actions">
+      <span class="badge bg-blue-lt text-blue">共 {{ counts.total }} 条</span>
+      {% if counts.late %}<span class="badge bg-purple-lt text-purple ms-1">迟交 {{ counts.late }}</span>{% endif %}
+    </div>
+  </div>
+  <div class="card-body border-bottom py-3 filter-bar" id="workbench-filter-bar">
+    <form method="get" action="{% url 'review-workbench' %}" class="row g-2 align-items-end">
+      <div class="col-12 col-md-3">
+        <label class="form-label" for="filter_activity_id">活动</label>
+        <select class="form-select" name="activity_id" id="filter_activity_id">
+          {% for act in activities %}
+          <option value="{{ act.id }}" {% if act.id|stringformat:"s" == activity_id %}selected{% endif %}>{{ act.title }}</option>
+          {% empty %}
+          <option value="">暂无可管理活动</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-md-3">
+        <label class="form-label" for="filter_class_name">班级</label>
+        <select class="form-select" name="class_name" id="filter_class_name">
+          <option value="">全部班级</option>
+          {% for cls in class_options %}
+          <option value="{{ cls }}" {% if class_filter == cls %}selected{% endif %}>{{ cls }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-md-2">
+        <label class="form-label" for="filter_status">状态</label>
+        <select class="form-select" name="status" id="filter_status">
+          <option value="">全部状态</option>
+          {% for opt in status_options %}
+          <option value="{{ opt.code }}" {% if status_filter == opt.code %}selected{% endif %}>{{ opt.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-md-2">
+        <label class="form-label" for="filter_late">迟交白名单</label>
+        <select class="form-select" name="late" id="filter_late">
+          <option value="">全部</option>
+          <option value="1" {% if late_filter == '1' %}selected{% endif %}>仅白名单学生</option>
+          <option value="0" {% if late_filter == '0' %}selected{% endif %}>非白名单学生</option>
+        </select>
+      </div>
+      <div class="col-12 col-md-auto d-flex gap-2">
+        <button type="submit" class="btn btn-primary">筛选</button>
+        <a class="btn btn-outline-secondary" href="{% url 'review-workbench' %}?activity_id={{ activity_id }}">重置</a>
+      </div>
+    </form>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table" id="workbench-table">
+      <thead>
+        <tr>
+          <th style="width: 110px;">学号</th>
+          <th style="width: 100px;">姓名</th>
+          <th style="width: 140px;">班级</th>
+          <th>活动名</th>
+          <th style="width: 140px;">提交时间</th>
+          <th style="width: 150px;">状态</th>
+          <th style="width: 140px;">审核历史</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr data-submission-row="{{ row.id }}" data-status="{{ row.badge_status }}">
+          <td class="text-secondary">{{ row.student_number }}</td>
+          <td><strong>{{ row.real_name|default:row.student_number }}</strong></td>
+          <td>{{ row.class_name|default:"-" }}</td>
+          <td>
+            <div>{{ row.activity_title }}</div>
+            {% if row.project_name %}<div class="text-secondary small">{{ row.project_name }}</div>{% endif %}
+          </td>
+          <td class="text-secondary small">{{ row.submitted_at|date:"Y-m-d H:i" }}</td>
+          <td>
+            <span class="badge badge-status badge-status-{{ row.badge_tone }}"
+                  data-status="{{ row.badge_status }}">{{ row.badge_label }}</span>
+          </td>
+          <td>
+            <button type="button"
+                    class="btn btn-sm btn-outline-secondary text-nowrap"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#history-{{ row.id }}"
+                    aria-expanded="false"
+                    aria-controls="history-{{ row.id }}">
+              {% if row.history %}审核历史（{{ row.history|length }}）{% else %}暂无历史{% endif %}
+            </button>
+            <a class="btn btn-sm btn-link px-1" href="{{ row.detail_url }}">详情</a>
+          </td>
+        </tr>
+        <tr class="collapse" id="history-{{ row.id }}">
+          <td colspan="7" class="p-0 border-0">
+            <div class="accordion accordion-flush" id="accordion-{{ row.id }}">
+              <div class="accordion-item">
+                <div class="accordion-body">
+                  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                    <strong>审核时间线 · {{ row.real_name|default:row.student_number }} · {{ row.activity_title }}</strong>
+                    <span class="badge badge-status badge-status-{{ row.badge_tone }}">{{ row.badge_label }}</span>
+                  </div>
+                    <ul class="timeline mb-0">
+                      {% for item in row.history %}
+                      <li class="timeline-event">
+                        <div class="timeline-event-icon {% if item.decision_code == 'approved' %}bg-success{% else %}bg-danger{% endif %}"></div>
+                        <div class="timeline-event-card">
+                          <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                            <div>
+                              <strong>{{ item.reviewer }}</strong>
+                              <span class="badge bg-secondary-lt text-secondary ms-1">{{ item.reviewer_stage }}</span>
+                              <span class="badge {% if item.decision_code == 'approved' %}bg-success-lt text-success{% else %}bg-danger-lt text-danger{% endif %} ms-1">{{ item.decision }}</span>
+                            </div>
+                            <span class="text-secondary small">{{ item.created_at|date:"Y-m-d H:i:s" }}</span>
+                          </div>
+                          {% if item.comment %}
+                          <div class="mt-2 small">{{ item.comment|linebreaksbr }}</div>
+                          {% else %}
+                          <div class="mt-2 small text-secondary">未填写审核意见</div>
+                          {% endif %}
+                        </div>
+                      </li>
+                      {% empty %}
+                      <li class="timeline-event">
+                        <div class="timeline-event-icon bg-secondary"></div>
+                        <div class="timeline-event-card">
+                          <span class="text-secondary small">该申报尚未产生审核记录。</span>
+                        </div>
+                      </li>
+                      {% endfor %}
+                    </ul>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="7" class="text-center text-secondary py-4">当前筛选条件下暂无申报记录。</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if is_college_admin and selected_activity %}
+<!-- 补交设置卡片：开关 + 补交截止 + 批量粘贴学号（StudentRoster 存在性校验） -->
+<div class="card card-pad mt-3" id="late-settings-card">
+  <h3 class="card-title mb-1">补交设置</h3>
+  <p class="text-secondary small">
+    活动截止后，白名单内的学号仍可创建/修改草稿、上传材料并提交审核；导出归档时会自动在文件名前加
+    <code>late_</code> 前缀，方便老师区分。
+  </p>
+  <form method="post" action="{% url 'admin-activity-late-settings' selected_activity.id %}" id="late-settings-form">
+    {% csrf_token %}
+    <div class="row g-3 align-items-end">
+      <div class="col-12 col-md-4">
+        <label class="form-check form-switch mb-0" for="late_submission_enabled">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 id="late_submission_enabled" name="late_submission_enabled"
+                 {% if selected_activity.late_submission_enabled %}checked{% endif %}>
+          <span class="form-check-label">启用补交白名单</span>
+        </label>
+      </div>
+      <div class="col-12 col-md-5">
+        <label class="form-label" for="late_submission_deadline">补交截止时间</label>
+        <input type="datetime-local" class="form-control" id="late_submission_deadline"
+               name="late_submission_deadline"
+               value="{{ selected_activity.late_submission_deadline|date:'Y-m-d\TH:i' }}">
+        <div class="form-hint">留空表示活动截止后长期开放给白名单学生。</div>
+      </div>
+      <div class="col-12 col-md-3">
+        <span class="small text-secondary">当前白名单：<strong>{{ selected_activity.late_whitelist_student_numbers|length }}</strong> 人</span>
+      </div>
+    </div>
+
+    <div class="mt-3">
+      <label class="form-label" for="late_whitelist_text">白名单学号（每行一个，也支持逗号/空格/分号批量粘贴，自动去重）</label>
+      <textarea class="form-control font-monospace" id="late_whitelist_text" name="late_whitelist_text" rows="8"
+                placeholder="2025080901&#10;2025080902&#10;2025080903">{{ whitelist_text }}</textarea>
+    </div>
+
+    <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
+      <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-parse-whitelist"
+              data-parse-url="{% url 'admin-activity-whitelist-parse' selected_activity.id %}">
+        解析并校验学号
+      </button>
+      <span class="small text-secondary" id="whitelist-parse-summary">
+        {% if whitelist_invalid %}上次保存有 {{ whitelist_invalid|length }} 个学号未通过存在性校验。{% endif %}
+      </span>
+    </div>
+
+    <div class="mt-2 d-flex flex-wrap gap-1" id="whitelist-invalid-box">
+      {% for sn in whitelist_invalid %}
+      <span class="badge badge-invalid-student" data-invalid-student="{{ sn }}">{{ sn }} · 不存在</span>
+      {% endfor %}
+    </div>
+
+    <div class="mt-3">
+      <button type="submit" class="btn btn-primary">保存补交设置</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  "use strict";
+
+  var EXPORT_POLL_INTERVAL_MS = 2000;
+  var csrfToken = (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] || "";
+  var pollTimer = null;
+  var currentJobId = null;
+
+  function byId(id) { return document.getElementById(id); }
+
+  function setProgress(job) {
+    var card = byId("export-progress-card");
+    var bar = byId("export-progress-bar");
+    var wrapper = byId("export-progress-wrapper");
+    var percent = byId("export-progress-percent");
+    var meta = byId("export-progress-meta");
+    var badge = byId("export-progress-badge");
+    var downloadWrap = byId("export-download-wrap");
+    var link = byId("export-download-link");
+    if (!card || !bar) { return; }
+
+    card.hidden = false;
+    var value = Number(job.percent || 0);
+    bar.style.width = value + "%";
+    if (wrapper) { wrapper.setAttribute("aria-valuenow", String(value)); }
+    if (percent) { percent.textContent = value + "%"; }
+    if (badge) {
+      badge.textContent = job.status_display || job.status;
+      badge.setAttribute("data-export-status", job.status);
+      badge.className = "badge " + (
+        job.status === "done" ? "bg-success-lt text-success" :
+        job.status === "failed" ? "bg-danger-lt text-danger" :
+        job.status === "running" ? "bg-blue-lt text-blue" : "bg-secondary-lt text-secondary"
+      );
+    }
+    if (meta) {
+      var files = job.file_count ? (" · 文件 " + job.file_count + " 份") : "";
+      meta.textContent = (job.activity_title || "导出任务") + files +
+        (job.status === "failed" ? (" · 失败：" + (job.error_code || "未知")) : "");
+    }
+    if (downloadWrap && link) {
+      if (job.status === "done" && job.download_url) {
+        link.href = job.download_url;
+        downloadWrap.hidden = false;
+      } else {
+        downloadWrap.hidden = true;
+      }
+    }
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function pollOnce(jobId) {
+    return fetch("/api/v1/exports/status/" + jobId + "/", {
+      headers: { "Accept": "application/json" },
+      credentials: "same-origin"
+    }).then(function (resp) {
+      if (!resp.ok) { throw new Error("status " + resp.status); }
+      return resp.json();
+    }).then(function (data) {
+      var job = data.job || {};
+      setProgress(job);
+      if (job.status === "done" || job.status === "failed") { stopPolling(); }
+      return job;
+    })["catch"](function () {
+      stopPolling();
+      var meta = byId("export-progress-meta");
+      if (meta) { meta.textContent = "进度查询失败，导出任务可能仍在后台运行，稍后刷新工作台查看。"; }
+    });
+  }
+
+  function startPolling(jobId) {
+    currentJobId = jobId;
+    stopPolling();
+    pollOnce(jobId);
+    pollTimer = setInterval(function () { pollOnce(jobId); }, EXPORT_POLL_INTERVAL_MS);
+  }
+
+  var exportBtn = byId("btn-start-export");
+  if (exportBtn) {
+    exportBtn.addEventListener("click", function () {
+      var activityId = exportBtn.getAttribute("data-activity-id");
+      if (!activityId) { return; }
+      exportBtn.disabled = true;
+      var card = byId("export-progress-card");
+      if (card) { card.hidden = false; }
+      var meta = byId("export-progress-meta");
+      if (meta) { meta.textContent = "正在创建导出任务…"; }
+
+      fetch(exportBtn.getAttribute("data-start-url"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrfToken,
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({ activity_id: activityId })
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (result) {
+        exportBtn.disabled = false;
+        if (!result.ok) {
+          var message = (result.data && result.data.error && result.data.error.message) || "导出任务创建失败。";
+          if (meta) { meta.textContent = message; }
+          return;
+        }
+        var job = result.data.job || {};
+        setProgress(job);
+        startPolling(result.data.job_id || job.job_id);
+      })["catch"](function () {
+        exportBtn.disabled = false;
+        if (meta) { meta.textContent = "网络异常，导出任务未能创建，请重试。"; }
+      });
+    });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll(".js-resume-export"), function (btn) {
+    btn.addEventListener("click", function () {
+      var jobId = btn.getAttribute("data-job-id");
+      if (jobId) { startPolling(jobId); }
+      var card = byId("export-progress-card");
+      if (card) { card.hidden = false; }
+    });
+  });
+
+  // 页面加载时若存在进行中的任务，自动接管第一个任务继续轮询。
+  var runningRow = document.querySelector('[data-job-status="running"], [data-job-status="pending"]');
+  if (runningRow) {
+    var row = runningRow.closest("tr");
+    if (row) {
+      var jobId = row.getAttribute("data-export-job");
+      if (jobId) { startPolling(jobId); }
+    }
+  }
+
+  // 白名单批量解析：多行/逗号/空格一键解析去重，并在 StudentRoster 中逐个校验。
+  var parseBtn = byId("btn-parse-whitelist");
+  if (parseBtn) {
+    parseBtn.addEventListener("click", function () {
+      var textarea = byId("late_whitelist_text");
+      var summary = byId("whitelist-parse-summary");
+      var box = byId("whitelist-invalid-box");
+      if (!textarea || !summary || !box) { return; }
+      parseBtn.disabled = true;
+      fetch(parseBtn.getAttribute("data-parse-url"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrfToken,
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({ student_numbers: textarea.value })
+      }).then(function (resp) { return resp.json(); }).then(function (data) {
+        parseBtn.disabled = false;
+        box.innerHTML = "";
+        (data.invalid || []).forEach(function (sn) {
+          var span = document.createElement("span");
+          span.className = "badge badge-invalid-student";
+          span.setAttribute("data-invalid-student", sn);
+          span.textContent = sn + " · 不存在";
+          box.appendChild(span);
+        });
+        summary.textContent = "共解析 " + (data.total || 0) + " 个学号：有效 " +
+          (data.valid_count || 0) + " 个，不存在 " + (data.invalid_count || 0) + " 个。";
+        summary.className = (data.invalid_count ? "text-danger" : "text-success") + " small";
+      })["catch"](function () {
+        parseBtn.disabled = false;
+        summary.textContent = "解析失败，请稍后重试。";
+      });
+    });
+  }
+})();
+</script>
+{% endblock %}

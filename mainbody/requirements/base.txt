@@ -1,4 +1,7 @@
 # Resolved using Python 3.12; update inputs then run scripts/lock_dependencies.py.
+# Pillow 是安全相关依赖：图片落盘后要过一次 Image.open().verify() 防伪造图片/像素炸弹。
+# 缺失时 apps.uploads.policies 会降级为结构校验并打 warning，不影响其他功能。
+Pillow==11.3.0
 amqp==5.4.1
 asgiref==3.12.1
 billiard==4.3.1

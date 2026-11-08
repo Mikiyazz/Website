@@ -1,51 +1,40 @@
 {% extends "base.html" %}
 {% block title %}账号登录 · 学院社会实践材料平台{% endblock %}
 {% block content %}
-jiangxinru-register
-<section class="card narrow"><p class="eyebrow">学院社会实践</p><h1>登录材料平台</h1>
-<p>请使用管理员分配的账号登录。</p>
-<form method="post">{% csrf_token %}{{ form.as_p }}
-<input type="hidden" name="next" value="{{ next }}"><button type="submit">登录</button></form>
-<div style="text-align: center; margin-top: 20px; font-size: 14px;">
-    <a href="register.html" style="color: #409eff; text-decoration: none;">还没有账号？点击这里用学号注册</a>
+<div class="card card-md">
+  <div class="card-body">
+    <div class="text-uppercase text-secondary fs-5 fw-bold mb-1 text-center">学院社会实践</div>
+    <h2 class="h2 text-center mb-3">登录材料平台</h2>
+    <p class="text-secondary text-center mb-3">请使用学号（或管理员/审核员账号）及密码登录系统。</p>
+
+    <div class="alert alert-info mb-3 hint-box" role="alert">
+      <strong>默认初始密码规则：</strong>学生账号默认初始密码为本人<strong>学号后 6 位</strong>，首次登录后系统将引导您修改密码；如忘记密码请联系辅导员或管理员在后台重置。
+    </div>
+
+    {% if form.errors %}
+    <div class="alert alert-important alert-danger alert-error mb-3" role="alert">
+      学号/账号或密码不正确，请核对后重新输入。
+    </div>
+    {% endif %}
+
+    <form method="post" action="{% url 'login' %}" id="login-form" autocomplete="off">
+      {% csrf_token %}
+      <div class="mb-3 form-row">
+        <label class="form-label required" for="id_username">学号 / 账号</label>
+        <input type="text" class="form-control" name="username" id="id_username" required autofocus autocomplete="username" placeholder="请输入学号或教工账号" value="{{ form.username.value|default:'' }}">
+      </div>
+      <div class="mb-3 form-row">
+        <label class="form-label required" for="id_password">登录密码</label>
+        <input type="password" class="form-control" name="password" id="id_password" required autocomplete="current-password" placeholder="请输入密码（默认初始密码为学号后6位）">
+      </div>
+      <input type="hidden" name="next" value="{{ next }}">
+      <div class="form-footer mt-4">
+        <button type="submit" class="btn btn-primary w-100" style="width:100%;">登录系统</button>
+      </div>
+    </form>
+  </div>
 </div>
-</section>{% endblock %}
-
-<section class="card narrow">
-  <p class="eyebrow">学院社会实践</p>
-  <h1>登录材料平台</h1>
-  <p>请使用学号（或管理员/审核员账号）及密码登录系统。</p>
-
-  <div class="hint-box">
-    <strong>默认初始密码规则：</strong>学生账号默认初始密码为本人<strong>学号后 6 位</strong>，首次登录后系统将引导您修改密码；如忘记密码请联系辅导员或管理员在后台重置。
-  </div>
-
-  {% if form.errors %}
-  <div class="alert-error" role="alert">
-    学号/账号或密码不正确，请核对后重新输入。
-  </div>
-  {% endif %}
-
-  <form method="post" action="{% url 'login' %}" id="login-form">
-    {% csrf_token %}
-    <div class="form-row">
-      <label for="id_username">学号 / 账号</label>
-      <input type="text" name="username" id="id_username" required autofocus autocomplete="username" placeholder="请输入学号或教工账号" value="{{ form.username.value|default:'' }}">
-    </div>
-    <div class="form-row">
-      <label for="id_password">登录密码</label>
-      <input type="password" name="password" id="id_password" required autocomplete="current-password" placeholder="请输入密码（默认初始密码为学号后6位）">
-    </div>
-    <input type="hidden" name="next" value="{{ next }}">
-    <div class="action-bar">
-      <button type="submit" style="width:100%;">登录系统</button>
-    </div>
-  </form>
-
-  <hr style="border:0; border-top:1px solid #e3ebf0; margin:20px 0;">
-  <p style="text-align:center; margin:0;">
-    还没有账号？<a href="{% url 'register-page' %}"><strong>点击进入学生自主注册</strong></a>
-  </p>
-</section>
+<div class="text-center text-secondary mt-3">
+  还没有账号？<a href="{% url 'register-page' %}"><strong>点击进入学生自主注册</strong></a>
+</div>
 {% endblock %}
-

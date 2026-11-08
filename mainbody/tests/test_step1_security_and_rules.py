@@ -6,13 +6,12 @@ from apps.accounts.admin import PlatformUserAdmin
 from apps.accounts.models import StudentRoster, User
 from apps.accounts.services import (
     batch_initialize_students,
-    change_password,
     register_student,
 )
 from apps.activities.admin import ActivityAdmin
 from apps.activities.models import Activity
 from apps.activities.selectors import ensure_activity_open
-from apps.common.errors import Conflict, DomainError
+from apps.common.errors import Conflict
 from apps.submissions.models import Submission
 from apps.submissions.services import create_draft, save_draft, submit_for_review
 from tests.conftest import seed_mandatory_materials

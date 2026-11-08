@@ -13,8 +13,13 @@ class Activity(BaseModel):
     allowed_classes = models.JSONField(default=list, blank=True)
     # Late submission whitelist containing student numbers allowed to save/submit after deadline.
     late_whitelist_student_numbers = models.JSONField("补交白名单", default=list, blank=True)
-    # Conservative scaffold default; the final business quota is configurable.
-    quota_bytes_per_student = models.PositiveBigIntegerField(default=10_000_000_000)
+    # 补交设置卡片的总开关与补交截止时间：关闭时白名单整体失效；
+    # 补交截止为空表示“活动截止后长期开放给白名单学生”。
+    late_submission_enabled = models.BooleanField("启用补交白名单", default=True)
+    late_submission_deadline = models.DateTimeField("补交截止时间", null=True, blank=True)
+    # 12 GiB = 12,884,901,888 B：容纳 5 个 2000MB 打包件（10,485,760,000 B），
+    # 余下约 2.4 GB（2.23 GiB）给申报表/报告/照片/普通证明材料。可按活动单独调整。
+    quota_bytes_per_student = models.PositiveBigIntegerField(default=12_884_901_888)
 
     class Meta:
         constraints = [
@@ -30,6 +35,16 @@ class Activity(BaseModel):
             not isinstance(x, str) or not x.strip() for x in self.late_whitelist_student_numbers
         ):
             raise ValidationError({"late_whitelist_student_numbers": "必须填写补交学生学号字符串的 JSON 列表。"})
+
+    def late_submission_allowed_at(self, moment=None) -> bool:
+        """白名单通道当前是否仍开放：开关打开且未超过补交截止时间。"""
+        if not self.late_submission_enabled:
+            return False
+        if self.late_submission_deadline is None:
+            return True
+        from django.utils import timezone
+
+        return (moment or timezone.now()) < self.late_submission_deadline
 
     def is_in_late_whitelist(self, student_number: str) -> bool:
         target = str(student_number or "").strip()

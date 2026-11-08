@@ -20,11 +20,27 @@ def test_duplicate_reservation_does_not_double_charge(student, rule):
 
 
 def test_aggregate_quota_rolls_back_failed_reservation(student, rule):
-    reserve(student, rule, 6_000_000_000)
+    # 活动默认额度 12,884,901,888 字节，两次 7GB 必定越界。
+    reserve(student, rule, 7_000_000_000)
     with pytest.raises(QuotaExceeded):
-        reserve(student, rule, 6_000_000_000)
+        reserve(student, rule, 7_000_000_000)
     assert UploadSession.objects.count() == 1
-    assert StorageQuota.objects.get(owner=student).reserved_bytes == 6_000_000_000
+    assert StorageQuota.objects.get(owner=student).reserved_bytes == 7_000_000_000
+
+
+def test_default_activity_quota_holds_five_zip_packs(activity):
+    """活动默认额度 12 GiB，装得下 5 个 2000MB 打包件且仍留有余量给普通材料。"""
+    from apps.activities.models import Activity
+
+    default_quota = Activity._meta.get_field("quota_bytes_per_student").default
+    assert default_quota == 12_884_901_888
+
+    five_packs = 5 * 2000 * 1024 * 1024
+    assert five_packs == 10_485_760_000
+    remaining = default_quota - five_packs
+    assert remaining == 2_399_141_888
+    # 余量至少还能装下 10 份 50MB 的普通证明材料（500MB）
+    assert remaining > 10 * 50 * 1024 * 1024
 
 
 def test_ten_gb_is_a_hard_ceiling(student, rule):

@@ -11,14 +11,31 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from apps.accounts.models import User
-from apps.accounts.permissions import is_college_admin, require_student
+from apps.accounts.permissions import (
+    is_college_admin,
+    require_college_admin,
+    require_reviewer_or_admin,
+    require_student,
+)
+from apps.accounts.models import StudentRoster
 from apps.activities.models import Activity
 from apps.activities.selectors import eligible_activities, is_activity_open_for_user
+from apps.activities.services import (
+    parse_student_numbers,
+    resolve_known_student_numbers,
+    update_late_submission_settings,
+)
 from apps.audit.services import record
 from apps.common.api import endpoint, json_body
 from apps.common.errors import DomainError, Forbidden
 from apps.exports.services import list_activity_declared_classes, resolve_status_filter
-from apps.reviews.selectors import reviewable_submissions
+from apps.reviews.selectors import (
+    collect_workbench_rows,
+    reviewable_submissions,
+    workbench_activities,
+    workbench_class_options,
+    workbench_whitelist_numbers,
+)
 from apps.reviews.services import review_submission
 from apps.reviews.views import serialize_submission_for_review
 from apps.submissions.models import Submission
@@ -81,6 +98,52 @@ def change_password_view(request):
     )
     update_session_auth_hash(request, user)
     return JsonResponse({"user": serialize_user(user)}, status=200)
+
+
+# =====================================================================
+# Student lookup: used by the team-member rows of the apply wizard
+# =====================================================================
+
+@endpoint("GET")
+def student_lookup_view(request):
+    """Placeholder lookup endpoint: {"exists": true, "real_name": "张三"} or {"exists": false}.
+
+    Reads the account table first and falls back to the imported StudentRoster.
+    """
+    require_student(request.user)
+    student_number = (request.GET.get("student_number") or "").strip()
+    if not student_number:
+        raise DomainError("请提供 student_number 查询参数。")
+
+    account = User.objects.filter(username=student_number, is_active=True).first()
+    if account is not None and (account.role in (User.Role.STUDENT, User.Role.REVIEWER, User.Role.ADMIN) or account.is_active):
+        return JsonResponse(
+            {
+                "exists": True,
+                "real_name": account.real_name or "",
+                "student_number": account.username,
+                "class_name": account.class_name or "",
+                "grade": account.grade or "",
+                "major": account.major or "",
+                "source": "account",
+            }
+        )
+
+    roster = StudentRoster.objects.filter(student_number=student_number, active=True).first()
+    if roster is None:
+        return JsonResponse({"exists": False, "student_number": student_number})
+
+    return JsonResponse(
+        {
+            "exists": True,
+            "real_name": roster.real_name or "",
+            "student_number": roster.student_number,
+            "class_name": roster.class_name or "",
+            "grade": roster.grade or "",
+            "major": roster.major or "",
+            "source": "roster",
+        }
+    )
 
 
 # =====================================================================
@@ -222,12 +285,16 @@ def _build_student_workbench_context(request):
         in_whitelist = act.is_in_late_whitelist(user.username)
         status_code = sub.status if sub else Submission.Status.DRAFT
         status_display = sub.get_status_display() if sub else "草稿"
+        badge_code = sub.badge_status if sub else Submission.Status.DRAFT
+        badge_label = sub.badge_label if sub else "草稿"
         activity_cards.append(
             {
                 "activity": act,
                 "submission": sub,
                 "status_code": status_code,
                 "status_display": status_display,
+                "badge_code": badge_code,
+                "badge_label": badge_label,
                 "can_write_now": can_write_now,
                 "window_label": window_label,
                 "in_whitelist": in_whitelist,
@@ -254,8 +321,11 @@ def _build_student_workbench_context(request):
         can_write_now, window_label = is_activity_open_for_user(selected_activity, user)
         submission = submissions_by_act.get(selected_activity.id)
         if submission is None and can_write_now:
-            submission = create_draft(actor=user, activity_id=selected_activity.id)
-            submissions_by_act[selected_activity.id] = submission
+            try:
+                submission = create_draft(actor=user, activity_id=selected_activity.id)
+                submissions_by_act[selected_activity.id] = submission
+            except (DomainError, Forbidden):
+                pass
 
         if submission is not None:
             raw_draft = submission.draft_data if isinstance(submission.draft_data, dict) else {}
@@ -368,6 +438,9 @@ def _build_student_workbench_context(request):
         "submission": submission,
         "status_code": submission.status if submission else Submission.Status.DRAFT,
         "status_display": submission.get_status_display() if submission else "草稿",
+        # 徽章口径与审核工作台一致：命中补交白名单的迟交材料显示 LATE_SUBMITTED。
+        "status_badge_code": submission.badge_status if submission else Submission.Status.DRAFT,
+        "status_badge_label": submission.badge_label if submission else "草稿",
         "is_locked": is_locked,
         "lock_reason": lock_reason,
         "is_returned": is_returned,
@@ -593,6 +666,7 @@ def student_submit_review_view(request, submission_id):
 
 @login_required
 @require_GET
+@require_reviewer_or_admin
 def review_submission_detail_view(request, submission_id):
     sub = get_object_or_404(Submission.objects.select_related("owner", "activity"), pk=submission_id)
     if not reviewable_submissions(request.user, sub.activity_id).filter(pk=sub.pk).exists():
@@ -616,6 +690,7 @@ def review_submission_detail_view(request, submission_id):
 
 @login_required
 @require_POST
+@require_reviewer_or_admin
 def review_submission_action_view(request, submission_id):
     sub = get_object_or_404(Submission.objects.select_related("owner", "activity"), pk=submission_id)
     decision = request.POST.get("decision", "").strip()
@@ -644,10 +719,8 @@ def review_submission_action_view(request, submission_id):
 
 @login_required
 @require_POST
+@require_college_admin
 def admin_save_activity_view(request):
-    if not is_college_admin(request.user):
-        return HttpResponseForbidden("仅学院管理员可执行此操作。")
-
     activity_id = request.POST.get("activity_id", "").strip()
     title = request.POST.get("title", "").strip()
     opens_at_raw = request.POST.get("opens_at", "").strip()
@@ -698,10 +771,8 @@ def admin_save_activity_view(request):
 
 @login_required
 @require_POST
+@require_college_admin
 def admin_whitelist_action_view(request, activity_id):
-    if not is_college_admin(request.user):
-        return HttpResponseForbidden("仅学院管理员可执行此操作。")
-
     act = get_object_or_404(Activity, pk=activity_id)
     action = request.POST.get("action", "add").strip().lower()
     raw_numbers = request.POST.get("student_numbers") or request.POST.get("student_number") or ""
@@ -724,3 +795,153 @@ def admin_whitelist_action_view(request, activity_id):
         metadata={"student_numbers": numbers, "late_whitelist_student_numbers": act.late_whitelist_student_numbers},
     )
     return redirect(f"/?activity_id={act.id}")
+# =====================================================================
+# 端点上锁：/admin-panel/ 与 /reviews/workbench/ 是管理端入口，
+# 学生直接敲 URL 必须被 role 装饰器 403 掉，并落一条 access.role_denied 审计。
+# =====================================================================
+
+@login_required
+@require_GET
+@require_college_admin
+def admin_panel_view(request):
+    """学院管理员专用工作台入口。"""
+    context = _build_reviewer_and_admin_context(request)
+    return render(request, "dashboard.html", context)
+
+
+def _build_review_workbench_context(request):
+    """审核工作台：服务端筛选（Q 对象）+ 全历史时间线 + 异步导出任务列表。"""
+    from apps.exports.views import list_export_jobs_for_user
+
+    user = request.user
+    is_admin = is_college_admin(user)
+    activities = list(workbench_activities(user))
+    valid_activity_ids = {str(act.id) for act in activities}
+
+    activity_id = (request.GET.get("activity_id") or "").strip()
+    if activity_id and activity_id not in valid_activity_ids:
+        activity_id = ""
+    if not activity_id and activities:
+        activity_id = str(activities[0].id)
+    selected_activity = next((act for act in activities if str(act.id) == activity_id), None)
+
+    class_filter = (request.GET.get("class_name") or request.GET.get("class") or "").strip()
+    status_filter = (request.GET.get("status") or "").strip()
+    late_filter = (request.GET.get("late") or "").strip()
+
+    whitelist_numbers = workbench_whitelist_numbers(activities=activities, activity_id=activity_id or None)
+    rows, _ = collect_workbench_rows(
+        user=user,
+        activity_id=activity_id or None,
+        class_name=class_filter,
+        status=status_filter,
+        late=late_filter,
+        whitelist_numbers=whitelist_numbers,
+    )
+
+    status_options = [{"code": code, "label": label, "tone": tone} for code, label, tone in Submission.BADGE_ORDER]
+    counts = {
+        "total": len(rows),
+        "late": sum(1 for row in rows if row["is_late"]),
+        "pending_first_review": sum(1 for row in rows if row["status_code"] == Submission.Status.PENDING_FIRST_REVIEW),
+        "pending_final_review": sum(1 for row in rows if row["status_code"] == Submission.Status.PENDING_FINAL_REVIEW),
+        "final_approved": sum(1 for row in rows if row["status_code"] == Submission.Status.FINAL_APPROVED),
+        "returned": sum(1 for row in rows if row["status_code"] == Submission.Status.RETURNED),
+    }
+
+    whitelist_invalid = request.session.pop("late_whitelist_invalid", [])
+    late_settings_saved = request.session.pop("late_settings_saved", False)
+    whitelist_text = (
+        "\n".join(str(sn) for sn in (selected_activity.late_whitelist_student_numbers or []))
+        if selected_activity
+        else ""
+    )
+
+    return {
+        "workbench_role": "admin" if is_admin else "reviewer",
+        "is_college_admin": is_admin,
+        "activities": activities,
+        "selected_activity": selected_activity,
+        "activity_id": activity_id,
+        "class_filter": class_filter,
+        "status_filter": status_filter,
+        "late_filter": late_filter,
+        "class_options": workbench_class_options(),
+        "status_options": status_options,
+        "rows": rows,
+        "counts": counts,
+        "whitelist_numbers": whitelist_numbers,
+        "whitelist_text": whitelist_text,
+        "whitelist_invalid": whitelist_invalid,
+        "late_settings_saved": late_settings_saved,
+        "can_export": bool(selected_activity) and (is_admin or user.role == User.Role.REVIEWER),
+        "export_jobs": list_export_jobs_for_user(user),
+        "export_root": f"/api/v1/exports/",
+    }
+
+
+@login_required
+@require_GET
+@require_reviewer_or_admin
+def review_workbench_view(request):
+    """审核老师/学院管理员专用工作台入口：表格 + 筛选 + 审核历史时间线 + 批量导出。"""
+    return render(request, "reviews/workbench.html", _build_review_workbench_context(request))
+
+
+@login_required
+@require_POST
+@require_college_admin
+def admin_late_settings_view(request, activity_id):
+    """补交设置卡片保存：开关 + 补交截止时间 + 批量粘贴学号（去重后整体替换）。"""
+    act = get_object_or_404(Activity, pk=activity_id)
+    enabled = request.POST.get("late_submission_enabled") in ("on", "true", "1", "yes")
+    deadline_raw = request.POST.get("late_submission_deadline", "")
+    raw_numbers = request.POST.get("late_whitelist_text") or request.POST.get("student_numbers") or ""
+
+    try:
+        result = update_late_submission_settings(
+            actor=request.user,
+            activity=act,
+            enabled=enabled,
+            deadline_raw=deadline_raw,
+            raw_numbers=raw_numbers,
+        )
+    except DomainError as exc:
+        messages.error(request, str(exc))
+        return redirect(f"/reviews/workbench/?activity_id={act.id}")
+
+    request.session["late_settings_saved"] = True
+    if result["invalid"]:
+        request.session["late_whitelist_invalid"] = result["invalid"]
+        messages.warning(
+            request,
+            f"补交设置已保存：{len(result['valid'])} 个学号写入白名单；"
+            f"{len(result['invalid'])} 个学号在 StudentRoster 中不存在，已标红并未写入。",
+        )
+    else:
+        messages.success(
+            request,
+            f"补交设置已保存：白名单 {len(result['valid'])} 个学号，开关{'已开启' if enabled else '已关闭'}。",
+        )
+    return redirect(f"/reviews/workbench/?activity_id={act.id}")
+
+
+@endpoint("POST")
+def admin_parse_whitelist_view(request, activity_id):
+    """textarea 实时校验：解析 + 去重 + StudentRoster 存在性检查，返回非法学号供前端标红。"""
+    if not is_college_admin(request.user):
+        raise Forbidden("仅学院管理员可校验补交白名单。")
+    Activity.objects.get(pk=activity_id)
+    data = json_body(request)
+    numbers = parse_student_numbers(data.get("student_numbers") or data.get("late_whitelist_text") or "")
+    resolved = resolve_known_student_numbers(numbers)
+    return JsonResponse(
+        {
+            "total": resolved["total"],
+            "valid": resolved["valid"],
+            "invalid": resolved["invalid"],
+            "valid_count": len(resolved["valid"]),
+            "invalid_count": len(resolved["invalid"]),
+        },
+        status=200,
+    )

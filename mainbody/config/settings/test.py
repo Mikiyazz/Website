@@ -26,3 +26,6 @@ PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 STORAGES["staticfiles"] = {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}
 CELERY_TASK_ALWAYS_EAGER = True
+# 测试环境不依赖本机 ffmpeg：视频探测代码路径由 test_step8 用假 ffprobe 脚本注入验证，
+# 这样"有/没有 ffprobe"的两种降级行为都可复现，不受跑测试的机器影响。
+UPLOAD_FFPROBE_BIN = ""
