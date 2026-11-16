@@ -39,6 +39,9 @@ urlpatterns = [
     path("api/v1/reviews/", include("apps.reviews.urls")),
     path("api/v1/uploads/", include("apps.uploads.urls")),
     path("api/v1/exports/", include("apps.exports.urls")),
+    # 可选新闻稿：JSON 接口 + 页面（/news/ 与独立审核页 /reviews/news/）
+    path("api/v1/news/", include("apps.news.urls")),
+    path("", include("apps.news.page_urls")),
     path("", account_views.dashboard_view, name="dashboard"),
 ]
 if settings.DEBUG:

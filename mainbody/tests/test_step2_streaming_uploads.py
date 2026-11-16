@@ -34,11 +34,11 @@ def test_media_root_and_memory_protection_settings():
 
 
 # =====================================================================
-# 2. 五类标准材料规则与双重硬性校验（文件名 + 32字节魔数）测试
+# 2. 标准材料规则与双重硬性校验（文件名 + 32字节魔数）测试
 # =====================================================================
 
 def test_five_standard_material_rules_configuration(activity):
-    """验证五类标准材料规则配置完整且参数准确。"""
+    """验证标准材料规则配置完整且参数准确（第 6 类 news_document 为选交新闻稿）。"""
     reqs = ensure_standard_material_requirements(activity)
     assert set(reqs.keys()) == {
         "application_form",
@@ -46,6 +46,7 @@ def test_five_standard_material_rules_configuration(activity):
         "scene_photos",
         "video",
         "other_materials",
+        "news_document",
     }
 
     assert reqs["application_form"].required is True

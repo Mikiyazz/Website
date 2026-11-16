@@ -144,10 +144,10 @@ def test_apply_page_renders_four_step_wizard(client, student, activity):
     assert 'id="btn-add-member"' in html
     assert 'id="team-member-template"' in html
 
-    # Step3 五个独立 FilePond 实例
-    for code in ("application_form", "practice_report", "scene_photos", "video", "other_materials"):
+    # Step3 六个独立 FilePond 实例（第 6 个是选交的新闻稿 .docx）
+    for code in ("application_form", "practice_report", "scene_photos", "video", "other_materials", "news_document"):
         assert 'id="pond-' + code + '"' in html
-    assert html.count('class="filepond-zone"') == 5
+    assert html.count('class="filepond-zone"') == 6
 
     # Step4 确认提交
     assert 'id="summary-materials"' in html

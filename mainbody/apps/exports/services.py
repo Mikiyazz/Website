@@ -22,7 +22,9 @@ from apps.uploads.policies import SINGLE_FILE_MATERIAL_CODES, STANDARD_MATERIAL_
 from apps.uploads.services import STREAM_CHUNK_BYTES, resolve_file_disk_path
 from .models import ExportJob
 
-EXCEL_HEADERS = ["学号", "姓名", "班级", "项目名", "类别", "审核状态"]
+EXCEL_HEADERS = ["学号", "姓名", "班级", "项目名", "类别", "审核状态", "新闻稿状态"]
+# 没有新闻稿时的第 7 列取值；与 apps.news.models.NewsDraft.NO_NEWS_LABEL 保持一致。
+NO_NEWS_LABEL = "未提交"
 
 STATUS_DISPLAY_MAP = {
     Submission.Status.DRAFT: "草稿",
@@ -142,7 +144,11 @@ def list_activity_declared_classes(*, actor, activity_id) -> list[str]:
 
 
 def generate_activity_excel_workbook(*, actor, activity_id, class_name: str | None = None, status: str | None = None):
-    """Generate an openpyxl Workbook with the 6 standard summary columns."""
+    """Generate an openpyxl Workbook with the 7 standard summary columns.
+
+    第 7 列「新闻稿状态」来自 apps.news 的 OneToOne 反查：没有新闻稿时写「未提交」，
+    不为此凭空创建 NewsDraft 行。
+    """
     act_uuid = _parse_activity_uuid(activity_id)
     activity = Activity.objects.get(pk=act_uuid)
     qs = build_filtered_submissions_queryset(
@@ -150,7 +156,7 @@ def generate_activity_excel_workbook(*, actor, activity_id, class_name: str | No
         activity=activity,
         class_name=class_name,
         status=status,
-    )
+    ).select_related("news_draft")
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -163,6 +169,8 @@ def generate_activity_excel_workbook(*, actor, activity_id, class_name: str | No
         student_class = sub.owner.class_name or ""
         project_name, category = extract_submission_project_info(sub)
         status_label = STATUS_DISPLAY_MAP.get(sub.status, sub.get_status_display())
+        news = getattr(sub, "news_draft", None)
+        news_label = news.excel_label if news is not None else NO_NEWS_LABEL
         ws.append([
             student_number,
             real_name,
@@ -170,6 +178,7 @@ def generate_activity_excel_workbook(*, actor, activity_id, class_name: str | No
             project_name,
             category,
             status_label,
+            news_label,
         ])
 
     return wb, activity
@@ -214,6 +223,13 @@ def export_activity_excel_stream(*, actor, activity_id, class_name: str | None =
         metadata={"activity_id": str(activity.id), "class_name": str(class_name or "").strip(), "status": str(status or "").strip()},
     )
     return tmp_file, filename
+
+
+def _news_title_for(submission: Submission) -> str:
+    """新闻稿在 ZIP 中的显示名：优先用学生填写的标题，否则退回原始文件名。"""
+    news = getattr(submission, "news_draft", None)
+    title = str(getattr(news, "title", "") or "").strip()
+    return title or "新闻稿"
 
 
 def _build_material_arcname_filename(req_code: str, req_title: str, ext: str, index: int, total_in_category: int, max_count: int) -> str:
@@ -289,6 +305,18 @@ def export_class_zip_stream(*, actor, activity_id, class_name: str, status: str 
             for req_code, items in grouped.items():
                 total = len(items)
                 for idx, (up, disk_path) in enumerate(items, start=1):
+                    if req_code == "news_document":
+                        # 新闻稿按「原标题.docx」归档到学生目录（与其他类别同级，ZipFile 自动建目录）。
+                        title_stem = sanitize_filename(_news_title_for(sub), default="新闻稿")
+                        arcname = f"{student_folder}/{title_stem}.docx"
+                        dedup_idx = idx
+                        while arcname in used_arcnames:
+                            dedup_idx += 1
+                            arcname = f"{student_folder}/{title_stem}_{dedup_idx}.docx"
+                        used_arcnames.add(arcname)
+                        with open(disk_path, "rb") as src_stream, zf.open(arcname, "w") as dst_stream:
+                            shutil.copyfileobj(src_stream, dst_stream, length=STREAM_CHUNK_BYTES)
+                        continue
                     ext = Path(up.original_name).suffix.lower() or disk_path.suffix.lower()
                     file_label = _build_material_arcname_filename(
                         req_code=req_code,
@@ -378,7 +406,7 @@ def build_export_entries(*, activity: Activity, allowed_classes=None) -> list[di
     """Collect (source file, archive name, size) tuples for one activity without touching bytes."""
     submissions = list(
         Submission.objects.filter(activity=activity)
-        .select_related("owner")
+        .select_related("owner", "news_draft")
         .order_by("owner__class_name", "owner__username", "created_at")
     )
     if allowed_classes:
@@ -419,7 +447,12 @@ def build_export_entries(*, activity: Activity, allowed_classes=None) -> list[di
                 continue
 
             category = _material_title(upload.requirement.code, upload.requirement.title)
-            stem = sanitize_filename(Path(upload.original_name).stem, default="附件")
+            if upload.requirement.code == "news_document":
+                # 新闻稿统一叫「新闻稿.docx」：学生自己起的标题可能重名或含怪字符，
+                # 归档侧只认类别名，标题在 Excel 第 7 列与页面里体现。
+                stem = _material_title("news_document", upload.requirement.title)
+            else:
+                stem = sanitize_filename(Path(upload.original_name).stem, default="附件")
             extension = Path(upload.original_name).suffix.lower() or source_path.suffix.lower()
             filename = sanitize_filename(f"{prefix}{stem}{extension}", default="附件")
 

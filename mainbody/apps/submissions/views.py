@@ -80,6 +80,18 @@ def submit(request, submission_id):
         except ValueError:
             raise DomainError("request_key 必须为 UUID。") from None
 
+    # 向导第 4 步只发 request_key，不带项目信息；若本次带了项目信息，先落草稿再提交，
+    # 否则会出现「页面填好了但服务端还是空草稿」的「材料不能为空」误报。
+    draft_data = data.get("draft_data")
+    if isinstance(draft_data, dict) and draft_data:
+        current = Submission.objects.get(pk=submission_id, owner=request.user)
+        save_draft(
+            actor=request.user,
+            submission_id=current.pk,
+            expected_version=data.get("expected_version", current.version),
+            data=draft_data,
+        )
+
     submission, revision = submit_for_review(actor=request.user, submission_id=submission_id, request_key=request_key)
     return JsonResponse(
         {
@@ -98,13 +110,15 @@ def submit(request, submission_id):
 # 允许进入申报向导的角色：所有在读学生（含兼任初审团支书与终审人员）。
 APPLY_ALLOWED_ROLES = frozenset({"student", "grad_student", "reviewer", "college_admin"})
 
-# 向导里五张材料卡片的展示顺序；与落库的五个标准类别完全一致，不再有别名映射。
+# 向导里材料卡片的展示顺序；与落库的标准类别完全一致，不再有别名映射。
+# news_document（新闻稿）是选交的第 6 类：只收 .docx，审核走独立的新闻稿链路。
 WIZARD_MATERIAL_CODES = (
     "application_form",
     "practice_report",
     "scene_photos",
     "video",
     "other_materials",
+    "news_document",
 )
 
 MB = 1024 * 1024

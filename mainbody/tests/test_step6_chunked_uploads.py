@@ -472,8 +472,8 @@ def test_apply_page_exposes_chunk_endpoints_and_progress_bar(client, student, ac
     # 旧骨架提示不再出现
     assert "下一次迭代接入" not in html
 
-    # FilePond 五个实例仍然都在（本任务只换 video 的上传通道）
-    assert html.count('class="filepond-zone"') == 5
+    # FilePond 六个实例仍然都在（本任务只换 video 的上传通道；第 6 个是选交新闻稿）
+    assert html.count('class="filepond-zone"') == 6
 
 
 def test_wizard_js_splits_video_into_5mb_chunks_and_guards_unload():

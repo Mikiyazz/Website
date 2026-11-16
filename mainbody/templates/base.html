@@ -77,7 +77,23 @@
                 <span class="nav-link-title">我的申报</span>
               </a>
             </li>
+            <li class="nav-item">
+              <a class="nav-link {% if request.resolver_match.url_name == 'news-list-page' or request.resolver_match.url_name == 'news-edit-page' %}active{% endif %}" href="{% url 'news-list-page' %}" title="我的新闻稿（选交）">
+                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="icon" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M4 5h11a2 2 0 0 1 2 2v11a2 2 0 0 1 -2 2h-9a2 2 0 0 1 -2 -2v-13" /><path d="M8 9h6" /><path d="M8 13h6" /><path d="M8 17h3" /><path d="M17 7l3 -3" /></svg>
+                </span>
+                <span class="nav-link-title">我的新闻稿</span>
+              </a>
+            </li>
             {% if user.role == "reviewer" or user.role == "college_admin" or user.is_staff or user.is_superuser %}
+            <li class="nav-item">
+              <a class="nav-link {% if request.resolver_match.url_name == 'news-review-page' %}active{% endif %}" href="{% url 'news-review-page' %}" title="新闻稿审核">
+                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="icon" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M4 6h9" /><path d="M4 12h9" /><path d="M4 18h6" /><path d="M15 13l2 2l4 -4" /></svg>
+                </span>
+                <span class="nav-link-title">新闻稿审核</span>
+              </a>
+            </li>
             <li class="nav-item">
               <a class="nav-link {% if request.resolver_match.url_name == 'review-workbench' or request.resolver_match.url_name == 'review-submission-detail' %}active{% endif %}" href="{% url 'review-workbench' %}" title="审核工作台">
                 <span class="nav-link-icon d-md-none d-lg-inline-block">

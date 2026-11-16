@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}新闻稿审核 · 学院社会实践材料平台{% endblock %}
+
+{% block content %}
+<div class="page-header d-print-none mb-3">
+  <div class="row g-2 align-items-center">
+    <div class="col">
+      <div class="page-pretitle">社会实践 · 新闻稿</div>
+      <h2 class="page-title">新闻稿审核</h2>
+    </div>
+    <div class="col-auto ms-auto d-print-none">
+      <a class="btn btn-outline-secondary" href="{{ workbench_url }}">返回工作台</a>
+    </div>
+  </div>
+</div>
+
+<div class="alert alert-info mb-3" role="alert">
+  {% if is_admin %}
+  你是<strong>学院管理员</strong>：可做<strong>终审</strong>（待终审 → 已采纳）。待初审的稿件在团支书初审通过后才会进入你的终审队列。
+  {% else %}
+  你是<strong>团支书</strong>：负责<strong>初审</strong>（待初审 → 待终审）。终审由团委组织管理员完成。
+  {% endif %}
+  退回必须填写意见。
+</div>
+
+<form method="get" class="card card-pad mb-3">
+  <div class="card-body">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-4">
+        <label class="form-label" for="filter-activity">活动</label>
+        <select class="form-select" id="filter-activity" name="activity_id">
+          <option value="">全部活动</option>
+          {% for activity in activities %}
+          <option value="{{ activity.id }}" {% if activity_id == activity.id|stringformat:"s" %}selected{% endif %}>{{ activity.title }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="filter-class">班级</label>
+        <input type="text" class="form-control" id="filter-class" name="class_name" value="{{ class_name }}" placeholder="精确匹配，如 信安25-1班">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="filter-status">状态</label>
+        <select class="form-select" id="filter-status" name="status">
+          <option value="">全部</option>
+          {% for code, label in status_options %}
+          <option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <button type="submit" class="btn btn-primary w-100">筛选</button>
+      </div>
+    </div>
+  </div>
+</form>
+
+{% if not rows %}
+<div class="card card-pad">
+  <div class="card-body text-center py-5 text-secondary">当前筛选条件下没有待处理的新闻稿。</div>
+</div>
+{% else %}
+<div class="card card-pad">
+  <div class="card-header">
+    <h3 class="card-title">共 {{ rows|length }} 篇</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>学生</th>
+          <th>活动</th>
+          <th>标题</th>
+          <th style="width:110px;">状态</th>
+          <th style="width:70px;">版本</th>
+          <th style="width:110px;">附件</th>
+          <th style="width:260px;">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <div class="fw-bold">{{ row.student_name }}</div>
+            <div class="text-secondary small">{{ row.student_number }}{% if row.class_name %} · {{ row.class_name }}{% endif %}</div>
+          </td>
+          <td class="text-secondary small">{{ row.activity_title }}</td>
+          <td>
+            <div class="fw-bold">{{ row.title|default:"（未填写标题）" }}</div>
+            {% if row.stale_review %}
+            <div class="text-warning small mt-1">学生已重新提交（当前 V{{ row.version }}，你审的是 V{{ row.reviewed_version }}），请复审。</div>
+            {% endif %}
+            {% if row.returned_comment and row.status == "returned" %}
+            <div class="text-danger small mt-1">退回意见：{{ row.returned_comment }}</div>
+            {% endif %}
+          </td>
+          <td><span class="badge badge-{{ row.badge_tone }}">{{ row.status_display }}</span></td>
+          <td>V{{ row.version }}</td>
+          <td>
+            {% if row.document %}
+            <a class="btn btn-sm btn-outline-secondary" href="{{ row.document.download_url }}">下载</a>
+            {% else %}
+            <span class="text-secondary small">无</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if row.status == "submitted" %}
+            <form method="post" action="/reviews/news/{{ row.id }}/action/" class="d-flex gap-1 flex-column">
+              {% csrf_token %}
+              <input type="text" class="form-control form-control-sm" name="comment" placeholder="初审意见（退回必填）">
+              <div class="d-flex gap-1">
+                <button type="submit" name="decision" value="approve" class="btn btn-sm btn-success flex-fill">初审通过</button>
+                <button type="submit" name="decision" value="return" class="btn btn-sm btn-outline-danger flex-fill">退回</button>
+              </div>
+            </form>
+            {% elif row.status == "reviewing" %}
+              {% if is_admin %}
+              <form method="post" action="/reviews/news/{{ row.id }}/action/" class="d-flex gap-1 flex-column">
+                {% csrf_token %}
+                <input type="text" class="form-control form-control-sm" name="comment" placeholder="终审意见（退回必填）">
+                <div class="d-flex gap-1">
+                  <button type="submit" name="decision" value="approve" class="btn btn-sm btn-success flex-fill">终审采纳</button>
+                  <button type="submit" name="decision" value="return" class="btn btn-sm btn-outline-danger flex-fill">退回</button>
+                </div>
+              </form>
+              {% else %}
+              <span class="text-secondary small">等待团委终审</span>
+              {% endif %}
+            {% else %}
+            <span class="text-secondary small">已处理</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
