@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}新闻稿编辑 · 学院社会实践材料平台{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'vendor/filepond/filepond.min.css' %}">
+<link rel="stylesheet" href="{% static 'vendor/filepond/plugins/filepond-plugin-file-poster.min.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="page-header d-print-none mb-3">
+  <div class="row g-2 align-items-center">
+    <div class="col">
+      <div class="page-pretitle">社会实践 · 选交材料</div>
+      <h2 class="page-title">新闻稿</h2>
+    </div>
+    <div class="col-auto ms-auto d-print-none">
+      <div class="btn-list">
+        <a class="btn btn-outline-secondary" href="{{ list_url }}">我的新闻稿</a>
+        <a class="btn btn-outline-secondary" href="{{ workbench_url }}">返回工作台</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if error_message %}
+<div class="alert alert-danger mb-3" role="alert">{{ error_message }}</div>
+{% endif %}
+
+{% if activities|length > 1 %}
+<form method="get" class="mb-3 d-flex align-items-center gap-2">
+  <label class="form-label mb-0 text-secondary" for="activity-switcher">选择活动</label>
+  <select class="form-select" id="activity-switcher" name="activity_id" onchange="this.form.submit()">
+    {% for activity in activities %}
+    <option value="{{ activity.id }}" {% if activity_id == activity.id|stringformat:"s" %}selected{% endif %}>{{ activity.title }}</option>
+    {% endfor %}
+  </select>
+</form>
+{% endif %}
+
+{% if not submission %}
+<div class="alert alert-warning" role="alert">
+  <h4 class="alert-title">尚未创建申报</h4>
+  <div>新闻稿依附于你的社会实践申报。请先到「我的申报」新建并提交主申报，再回来上传新闻稿。</div>
+</div>
+{% else %}
+{% if news and news.returned_comment and news.status == "returned" %}
+<div class="alert alert-danger mb-3 returned-comment-box" role="alert">
+  <h4 class="alert-title">审核意见：请修改后重新提交</h4>
+  <p class="mb-0">{{ news.returned_comment }}</p>
+</div>
+{% endif %}
+
+{% if news and not news.is_editable %}
+<div class="alert alert-locked mb-3" role="alert">
+  当前新闻稿状态为【{{ news.get_status_display }}】，已锁定不可修改。如需调整请联系团委老师退回。
+</div>
+{% endif %}
+
+<div class="row g-3">
+  <div class="col-lg-7">
+    <div class="card card-pad">
+      <div class="card-header">
+        <h3 class="card-title">稿件文字信息</h3>
+        <div class="card-actions text-secondary small">当前版本 V{{ news.version }}</div>
+      </div>
+      <div class="card-body">
+        <form method="post" action="{{ save_url }}" id="news-form">
+          {% csrf_token %}
+          <input type="hidden" name="expected_version" value="{{ news.version }}">
+
+          <div class="mb-3 form-row">
+            <label class="form-label required" for="news-title">标题 <span style="color:#c92a2a;">*</span></label>
+            <input type="text" class="form-control" id="news-title" name="title" maxlength="200"
+                   value="{{ news.title }}" placeholder="例如：计算机学院实践团赴乡村开展数字支教" {% if not news.is_editable %}disabled{% endif %} required>
+            <div class="form-hint">不超过 200 字，建议包含活动主体、地点与主题。</div>
+          </div>
+
+          <div class="mb-3 form-row">
+            <label class="form-label required" for="news-body">备注 / 内容摘要 <span style="color:#c92a2a;">*</span></label>
+            <textarea class="form-control" id="news-body" name="body" rows="8" maxlength="20000"
+                      placeholder="给审核老师的补充说明；正文请写在上传的 Word 文件中。" {% if not news.is_editable %}disabled{% endif %} required>{{ news.body }}</textarea>
+            <div class="form-hint">不超过 20000 字。完整新闻稿请以 .docx 附件形式提交。</div>
+          </div>
+
+          {% if news.is_editable %}
+          <div class="form-footer d-flex gap-2 flex-wrap">
+            <button type="submit" class="btn btn-outline-primary" formnovalidate>仅保存草稿</button>
+            <button type="button" class="btn btn-primary" id="btn-news-submit">提交审核</button>
+          </div>
+          {% endif %}
+        </form>
+
+        {% if news.is_editable %}
+        <form method="post" action="{{ submit_url }}" id="news-submit-form" class="d-none">
+          {% csrf_token %}
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card card-pad">
+      <div class="card-header"><h3 class="card-title">新闻稿 Word 附件</h3></div>
+      <div class="card-body">
+        <div class="alert alert-info mb-3 small" role="alert">
+          仅支持 <strong>.docx</strong>，单文件 ≤20MB。重复上传会自动替换旧文件；提交后仍可替换。
+        </div>
+
+        {% if document %}
+        <div class="mb-3 border rounded p-2">
+          <div class="d-flex align-items-center justify-content-between gap-2">
+            <div class="text-truncate">
+              <strong>{{ document.original_name }}</strong>
+              <div class="text-secondary small">{{ document.declared_bytes }} 字节 · 上传于 {{ document.created_at|date:"Y-m-d H:i" }}</div>
+            </div>
+            <div class="d-flex gap-1">
+              <a class="btn btn-sm btn-outline-secondary" href="{{ document_view_url }}" target="_blank" rel="noopener">打开</a>
+              <a class="btn btn-sm btn-outline-secondary" href="{{ document_download_url }}">下载</a>
+              {% if news.is_editable %}
+              <button type="button" class="btn btn-sm btn-outline-danger" id="btn-delete-news-doc"
+                      data-delete-url="{{ document_delete_url }}"
+                      data-filename="{{ document.original_name }}">删除</button>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% else %}
+        <div class="text-secondary small mb-3">尚未上传 Word 文件。</div>
+        {% endif %}
+
+        {% if news.is_editable %}
+        <div class="mb-2 form-row">
+          <label class="form-label" for="news-docx-input">选择 / 拖放 Word 文件</label>
+          {# 原生 file input 交给底部 FilePond 脚本包装成拖拽区；name 不能与 NewsDraft 表单字段冲突。 #}
+          <input type="file"
+                 class="filepond-zone"
+                 id="news-docx-input"
+                 name="news_docx_upload"
+                 accept=".docx"
+                 data-requirement-id="{{ requirement_id }}"
+                 aria-label="新闻稿 Word 上传区">
+          <div class="form-hint mt-2" id="news-upload-hint">支持拖拽或点击浏览；选完文件立即上传，成功后会刷新附件区。</div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{# 供底部 FilePond 脚本读取的配置：必须是合法 JSON（json_script 会自动转义），不要写成裸变量。 #}
+{{ news_material_json|json_script:"news-material-json" }}
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+{% if news.is_editable %}
+<script src="{% static 'vendor/filepond/filepond.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/locale/zh-cn.global.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-validate-type.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-validate-size.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-poster.min.js' %}"></script>
+{% endif %}
+<script>
+(function () {
+  'use strict';
+
+  var form = document.getElementById('news-form');
+  var submitForm = document.getElementById('news-submit-form');
+  var submitBtn = document.getElementById('btn-news-submit');
+  var deleteBtn = document.getElementById('btn-delete-news-doc');
+  var hint = document.getElementById('news-upload-hint');
+  var csrfInput = form ? form.querySelector('input[name="csrfmiddlewaretoken"]') : null;
+  var CSRF_TOKEN = (csrfInput && csrfInput.value) || '';
+  var ACTIVITY_ID = '{{ activity_id|escapejs }}';
+  var DIRECT_UPLOAD_URL = '{{ direct_upload_url|escapejs }}';
+
+  function readJson(id) {
+    var node = document.getElementById(id);
+    if (!node) return null;
+    try { return JSON.parse(node.textContent || 'null'); } catch (e) { return null; }
+  }
+
+  /* ---- 1. 提交审核（走页面表单 POST，由服务端做全部业务校验） ---- */
+  if (submitBtn && form && submitForm) {
+    submitBtn.addEventListener('click', function () {
+      if (!form.checkValidity()) { form.reportValidity(); return; }
+      submitBtn.disabled = true;
+      submitForm.submit();
+    });
+  }
+
+  /* ---- 2. 删除已上传的 Word（POST /api/v1/news/<id>/document/） ---- */
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', function () {
+      var name = deleteBtn.dataset.filename || '该文件';
+      if (!window.confirm('确定删除新闻稿文件「' + name + '」吗？删除后需要重新上传并再次提交。')) return;
+      deleteBtn.disabled = true;
+      fetch(deleteBtn.dataset.deleteUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-CSRFToken': CSRF_TOKEN, 'X-Requested-With': 'XMLHttpRequest' }
+      })
+        .then(function (resp) {
+          return resp.json().catch(function () { return {}; }).then(function (data) {
+            return { ok: resp.ok, data: data };
+          });
+        })
+        .then(function (result) {
+          if (!result.ok) {
+            throw new Error((result.data.error && result.data.error.message) || '删除失败');
+          }
+          window.location.reload();
+        })
+        .catch(function (err) {
+          deleteBtn.disabled = false;
+          window.alert('删除失败：' + (err && err.message ? err.message : '未知错误'));
+        });
+    });
+  }
+
+  /* ---- 3. FilePond 拖拽上传区（脚本位于 FilePond 库之后，window.FilePond 必然就位） ---- */
+  var input = document.getElementById('news-docx-input');
+  if (!input) return;
+
+  if (!window.FilePond) {
+    if (hint) hint.textContent = '上传组件未加载，请刷新页面（Ctrl+F5）后重试。';
+    return;
+  }
+
+  var config = readJson('news-material-json') || {};
+  var requirementId = config.requirement_id || input.dataset.requirementId || '';
+  var maxFileMb = Number(config.max_file_mb) || 20;
+  var MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+  var plugins = [
+    window.FilePondPluginFileValidateType,
+    window.FilePondPluginFileValidateSize,
+    window.FilePondPluginFilePoster
+  ].filter(Boolean);
+  if (plugins.length) {
+    window.FilePond.registerPlugin.apply(window.FilePond, plugins);
+  }
+
+  window.FilePond.create(input, {
+    name: 'news_document',
+    allowMultiple: false,
+    maxFiles: 1,
+    acceptedFileTypes: [MIME],
+    fileValidateTypeLabelExpectedTypes: '仅支持 DOCX 格式',
+    fileValidateTypeDetectType: function (source, type) {
+      var filename = String((source && source.name) || '').toLowerCase();
+      return Promise.resolve(filename.slice(-5) === '.docx' ? MIME : type);
+    },
+    maxFileSize: maxFileMb + 'MB',
+    allowFilePoster: true,
+    // 选完立即上传；上传成功由 server.process 内自行刷新页面。
+    instantUpload: true,
+    labelIdle: '拖放新闻稿 Word，或者 <span class="filepond--label-action">浏览</span>'
+      + '<br><span class="filepond--label-hint">仅支持 .docx · 单份 ≤ ' + maxFileMb + 'MB · 上传后自动替换旧文件</span>',
+    labelFileProcessing: '正在上传',
+    labelFileProcessingComplete: '上传完成',
+    labelFileProcessingAborted: '已取消上传',
+    labelFileProcessingError: '上传失败',
+    labelFileLoadError: '读取失败',
+    labelFileProcessingRevertError: '撤销失败',
+    labelMaxFileSizeExceeded: '文件体积过大',
+    labelMaxFileSize: '单份不得超过 {filesize}',
+    labelFileTypeNotAllowed: '文件格式不支持',
+    labelButtonRemoveItem: '移除',
+    labelButtonAbortItemLoad: '取消',
+    labelButtonRetryItemLoad: '重试',
+    labelButtonAbortItemProcessing: '取消上传',
+    labelButtonUndoItemProcessing: '撤销',
+    labelButtonRetryItemProcessing: '重试',
+    labelTapToCancel: '点击取消',
+    labelTapToRetry: '点击重试',
+    labelTapToUndo: '点击撤销',
+    server: {
+      process: function (fieldName, file, metadata, load, error, progress, abort) {
+        var body = new FormData();
+        body.append('requirement_id', requirementId);
+        body.append('material_type', 'news_document');
+        body.append('activity_id', ACTIVITY_ID);
+        body.append('file', file);
+
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', DIRECT_UPLOAD_URL, true);
+        xhr.withCredentials = true;
+        xhr.setRequestHeader('X-CSRFToken', CSRF_TOKEN);
+        xhr.upload.onprogress = function (event) {
+          progress(event.lengthComputable, event.loaded, event.total);
+        };
+        xhr.onload = function () {
+          var payload = {};
+          try { payload = JSON.parse(xhr.responseText || '{}'); } catch (e) { payload = {}; }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            if (hint) hint.textContent = '上传成功，正在刷新…';
+            load(payload.id || payload.upload_id || 'ok');
+            window.setTimeout(function () { window.location.reload(); }, 400);
+          } else {
+            var message = (payload.error && payload.error.message) || ('上传失败（HTTP ' + xhr.status + '）');
+            if (hint) hint.textContent = message;
+            error(message);
+          }
+        };
+        xhr.onerror = function () {
+          if (hint) hint.textContent = '网络错误，上传失败。';
+          error('网络错误，上传失败。');
+        };
+        xhr.send(body);
+        return { abort: function () { xhr.abort(); error('上传已取消。'); } };
+      }
+    }
+  });
+})();
+</script>
+{% endblock %}

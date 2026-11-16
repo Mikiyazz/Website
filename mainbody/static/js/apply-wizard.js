@@ -312,6 +312,18 @@
     });
   }
 
+  // 提交时随请求带上第 1、2 步的填写内容，服务端先落草稿再提交。
+  // category 目前没有独立输入框，留空时服务端按空串处理，不影响项目名与队员快照。
+  function collectDraftPayload() {
+    var teamMembers = isTeamMode() ? collectMembers() : [];
+    return {
+      project_name: fieldProjectName.value.trim(),
+      category: '',
+      declaration_type: teamMembers.length ? 'team' : 'individual',
+      team_members: teamMembers
+    };
+  }
+
   function validateStepTwo() {
     if (!isTeamMode()) {
       return true;
@@ -987,6 +999,12 @@
     btnSubmit.disabled = true;
     btnSubmit.classList.add('btn-loading');
 
+    // 把第 1、2 步填的项目信息随提交一起带上：服务端先落草稿再提交，
+    // 避免只发 request_key 导致「已填内容未保存 -> 提交报材料为空」。
+    var submitPayload = {
+      request_key: uuid4(),
+      draft_data: collectDraftPayload()
+    };
     fetch(SUBMIT_URL, {
       method: 'POST',
       credentials: 'same-origin',
@@ -995,7 +1013,7 @@
         'X-CSRFToken': CSRF_TOKEN,
         'X-Requested-With': 'XMLHttpRequest'
       },
-      body: JSON.stringify({ request_key: uuid4() })
+      body: JSON.stringify(submitPayload)
     })
       .then(function (resp) {
         return resp.json().catch(function () { return {}; }).then(function (data) {

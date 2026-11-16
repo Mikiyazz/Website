@@ -24,6 +24,16 @@
     {% if user.class_name %} · {{ user.class_name }}{% endif %}）。
   </p>
 
+  <!-- 新闻稿（选交材料）指引：一行文字，直达独立新闻稿页面 -->
+  <div class="alert alert-info d-flex align-items-center justify-content-between flex-wrap gap-2 py-2 mb-4" role="status">
+    <span>
+      <strong>新闻稿（选交）：</strong>可在申报中上传 .docx，也可到
+      <a href="{% url 'news-list-page' %}" class="fw-bold">我的新闻稿</a>
+      撰写并提交，走「团支书初审 → 团委终审」，提交后仍可修改，被采纳后锁定。
+    </span>
+    <a class="btn btn-sm btn-primary" href="{% url 'news-list-page' %}">前往我的新闻稿</a>
+  </div>
+
   <!-- 1. 活动列表与当前审核状态徽章 -->
   <div class="card card-pad mb-4">
     <h3 class="card-title mb-3">开放申报的社会实践活动列表</h3>
