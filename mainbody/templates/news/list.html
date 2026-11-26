@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}我的新闻稿 · 学院社会实践材料平台{% endblock %}
+
+{% block content %}
+<div class="page-header d-print-none mb-3">
+  <div class="row g-2 align-items-center">
+    <div class="col">
+      <div class="page-pretitle">社会实践 · 选交材料</div>
+      <h2 class="page-title">我的新闻稿</h2>
+    </div>
+    <div class="col-auto ms-auto d-print-none">
+      <div class="btn-list">
+        <a class="btn btn-primary" href="{{ edit_url }}">撰写 / 上传新闻稿</a>
+        <a class="btn btn-outline-secondary" href="{{ workbench_url }}">返回工作台</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="alert alert-info mb-3" role="alert">
+  新闻稿为<strong>选交材料</strong>：仅支持 <code>.docx</code>（≤20MB），提交后走「团支书初审 → 团委组织管理员终审」。
+  已提交/待审期间仍可修改并重新提交，<strong>被采纳后锁定</strong>。
+</div>
+
+{% if not rows %}
+<div class="card card-pad">
+  <div class="card-body text-center py-5">
+    <h3 class="mb-2">还没有新闻稿</h3>
+    <p class="text-secondary mb-3">先完成并提交主申报，再回来上传新闻稿 Word 文件。</p>
+    <a class="btn btn-primary" href="{{ edit_url }}">开始撰写</a>
+  </div>
+</div>
+{% else %}
+<div class="card card-pad">
+  <div class="card-header">
+    <h3 class="card-title">共 {{ rows|length }} 篇</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>标题</th>
+          <th style="width:110px;">状态</th>
+          <th style="width:70px;">版本</th>
+          <th style="width:150px;">最近更新</th>
+          <th>附件</th>
+          <th style="width:230px;">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <div class="fw-bold">{{ row.title|default:"（未填写标题）" }}</div>
+            <div class="text-secondary small">{{ row.activity_title }}</div>
+            {% if row.returned_comment and row.status == "returned" %}
+            <div class="text-danger small mt-1">退回意见：{{ row.returned_comment }}</div>
+            {% endif %}
+          </td>
+          <td><span class="badge badge-{{ row.badge_tone }}">{{ row.status_display }}</span></td>
+          <td>V{{ row.version }}</td>
+          <td class="text-secondary small">{{ row.updated_at|slice:":16" }}</td>
+          <td>
+            {% if row.document %}
+            <div class="text-truncate" style="max-width:220px;" title="{{ row.document.original_name }}">{{ row.document.original_name }}</div>
+            {% else %}
+            <span class="text-secondary small">未上传</span>
+            {% endif %}
+          </td>
+          <td>
+            <div class="d-flex gap-1 flex-wrap">
+              <a class="btn btn-sm btn-outline-primary" href="{{ row.edit_url }}">查看</a>
+              {% if row.document %}
+              <a class="btn btn-sm btn-outline-secondary" href="{{ row.document.view_url }}" target="_blank" rel="noopener">打开</a>
+              <a class="btn btn-sm btn-outline-secondary" href="{{ row.document.download_url }}">下载</a>
+              {% if row.is_editable %}
+              <button type="button" class="btn btn-sm btn-outline-danger js-delete-news-doc"
+                      data-news-id="{{ row.id }}"
+                      data-delete-url="/api/v1/news/{{ row.id }}/document/"
+                      data-filename="{{ row.document.original_name }}">删除</button>
+              {% endif %}
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  function csrfToken() {
+    var match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  document.querySelectorAll('.js-delete-news-doc').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var name = btn.dataset.filename || '该文件';
+      if (!window.confirm('确定删除新闻稿文件「' + name + '」吗？删除后需要重新上传并再次提交。')) {
+        return;
+      }
+      btn.disabled = true;
+      fetch(btn.dataset.deleteUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'X-CSRFToken': csrfToken(), 'X-Requested-With': 'XMLHttpRequest'}
+      })
+        .then(function (resp) {
+          return resp.json().catch(function () { return {}; }).then(function (data) {
+            return {ok: resp.ok, data: data};
+          });
+        })
+        .then(function (result) {
+          if (!result.ok) {
+            throw new Error((result.data.error && result.data.error.message) || '删除失败');
+          }
+          window.location.reload();
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          window.alert('删除失败：' + (err && err.message ? err.message : '未知错误'));
+        });
+    });
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

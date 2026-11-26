@@ -190,13 +190,14 @@ def test_export_excel_summary_headers_rows_and_filters(client, activity, db):
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
 
-    assert list(rows[0]) == ["学号", "姓名", "班级", "项目名", "类别", "审核状态"]
+    # 表头固定 7 列：第 7 列为新闻稿状态（无新闻稿时写「未提交」）。
+    assert list(rows[0]) == ["学号", "姓名", "班级", "项目名", "类别", "审核状态", "新闻稿状态"]
     expected_rows = [
-        ("20250101", "张三", "信安25-1班", "红色基地调研", "红色寻访", "终审通过"),
-        ("20250102", "李四", "信安25-1班", "网络安全科普进社区", "科普宣讲", "待终审"),
-        ("20250103", "王五", "信安25-1班", "反诈宣传实践", "社会调查", "打回修改"),
-        ("20250201", "赵六", "计算机25-2班", "乡村数字治理调研", "乡村振兴", "待初审"),
-        ("20250202", "钱七", "计算机25-2班", "非遗数字化保护", "文化传承", "草稿"),
+        ("20250101", "张三", "信安25-1班", "红色基地调研", "红色寻访", "终审通过", "未提交"),
+        ("20250102", "李四", "信安25-1班", "网络安全科普进社区", "科普宣讲", "待终审", "未提交"),
+        ("20250103", "王五", "信安25-1班", "反诈宣传实践", "社会调查", "打回修改", "未提交"),
+        ("20250201", "赵六", "计算机25-2班", "乡村数字治理调研", "乡村振兴", "待初审", "未提交"),
+        ("20250202", "钱七", "计算机25-2班", "非遗数字化保护", "文化传承", "草稿", "未提交"),
     ]
     assert rows[1:] == expected_rows
 
@@ -205,7 +206,7 @@ def test_export_excel_summary_headers_rows_and_filters(client, activity, db):
     assert resp_cls.status_code == 200
     ws_cls = openpyxl.load_workbook(io.BytesIO(resp_cls.content)).active
     rows_cls = list(ws_cls.iter_rows(values_only=True))
-    assert list(rows_cls[0]) == ["学号", "姓名", "班级", "项目名", "类别", "审核状态"]
+    assert list(rows_cls[0]) == ["学号", "姓名", "班级", "项目名", "类别", "审核状态", "新闻稿状态"]
     assert rows_cls[1:] == expected_rows[:3]
 
     # 4) 按状态筛选 (?status=final_approved 及中文 ?status=终审通过)
@@ -385,4 +386,4 @@ def test_reviewer_export_permission_boundaries(client, activity, db):
     ws = openpyxl.load_workbook(io.BytesIO(scoped_excel.content)).active
     rows = list(ws.iter_rows(values_only=True))
     assert len(rows) == 2
-    assert rows[1] == ("20250301", "甲同学", "信安25-1班", "信安实践项目", "社会调查", "待初审")
+    assert rows[1] == ("20250301", "甲同学", "信安25-1班", "信安实践项目", "社会调查", "待初审", "未提交")

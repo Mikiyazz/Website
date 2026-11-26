@@ -251,6 +251,7 @@
                 {% if material.code == "practice_report" %}仅接受 .pdf 实践报告，单份 ≤ 20MB。{% endif %}
                 {% if material.code == "video" %}选交，.mp4 / .mov / .avi / .mkv，单份 ≤ 300MB。{% endif %}
                 {% if material.code == "other_materials" %}选交，最多 10 份（其中 ZIP 打包材料最多 5 份）；普通材料单份 ≤ 50MB，ZIP 打包材料单份 ≤ 2000MB。{% endif %}
+                {% if material.code == "news_document" %}选交，仅接受 .docx 新闻稿，单份 ≤ 20MB；提交后仍可替换，审核在「我的新闻稿」独立页面进行。{% endif %}
               </div>
               <div class="small text-danger mt-1 d-none" data-upload-error="{{ material.code }}"></div>
             </div>

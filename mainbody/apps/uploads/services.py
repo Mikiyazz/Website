@@ -39,12 +39,17 @@ ACTIVE_STATES = [
 
 STREAM_CHUNK_BYTES = 64 * 1024
 
+# 主申报提交后仍允许学生上传/替换的类别：新闻稿是"提交后仍能改"的选交材料，
+# 由 apps.news 的活动窗口与状态机负责约束，不用主申报的只读窗口拦截。
+EDITABLE_AFTER_SUBMIT_CODES = frozenset({"news_document"})
+
 
 def ensure_standard_material_requirements(activity) -> dict[str, MaterialRequirement]:
-    """Ensure the five standard material requirements are configured on the given activity.
+    """Ensure every standard material requirement is configured on the given activity.
 
     Rows are refreshed from STANDARD_MATERIAL_RULES on every call, so rule changes
-    (for example adding .zip to other_materials) reach activities that already exist.
+    (for example adding .zip to other_materials, or the optional news_document) reach
+    activities that already exist.
     """
     result: dict[str, MaterialRequirement] = {}
     for code, spec in seeded_material_rules():
@@ -235,7 +240,13 @@ def direct_upload(*, actor, requirement_id, file_obj, replace_upload_id=None, re
     from apps.submissions.models import Submission
 
     existing_sub = Submission.objects.filter(owner=owner, activity=rule.activity).first()
-    if existing_sub and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED):
+    # news_document（新闻稿）是"选交且提交后仍可改"的材料：主申报已提交/已终审后仍要允许
+    # 学生替换 Word，因此不套用主申报材料的"只读窗口"限制。其他类别维持原规则。
+    if (
+        rule.code not in EDITABLE_AFTER_SUBMIT_CODES
+        and existing_sub
+        and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED)
+    ):
         raise Conflict(f"当前申报状态为【{existing_sub.get_status_display()}】，不允许上传或替换材料。")
 
     quota, _ = StorageQuota.objects.get_or_create(
@@ -460,7 +471,12 @@ def delete_uploaded_file(*, actor, upload_id):
         from apps.submissions.models import Submission
 
         existing_sub = Submission.objects.filter(owner=owner, activity=upload.requirement.activity).first()
-        if existing_sub and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED):
+        # 新闻稿是"提交后仍能改"的选交材料：主申报流转后也要允许学生自己删除重传。
+        if (
+            upload.requirement.code not in EDITABLE_AFTER_SUBMIT_CODES
+            and existing_sub
+            and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED)
+        ):
             raise Conflict(f"当前申报状态为【{existing_sub.get_status_display()}】，不允许删除材料。")
 
     quota = StorageQuota.objects.select_for_update().get(pk=upload.quota_id)
@@ -498,7 +514,11 @@ def delete_uploaded_file(*, actor, upload_id):
 
 
 def validate_required_materials(*, actor, activity) -> None:
-    """Verify all mandatory materials (application_form=1, practice_report=1, scene_photos=3..5) are validly uploaded."""
+    """Verify all mandatory materials (application_form=1, practice_report=1, scene_photos=3..5) are validly uploaded.
+
+    错误信息里带齐「缺什么 / 现在几份 / 该去哪里补传」，避免学生看到「材料不能为空」这类
+    与真实原因无关的提示。
+    """
     valid_uploads = list(
         UploadSession.objects.select_related("requirement", "fileasset").filter(
             owner=actor,

@@ -110,6 +110,18 @@ STANDARD_MATERIAL_RULES = {
         "min_count": 0,
         "max_count": 1,
     },
+    # 可选新闻稿（apps.news）：口头/选交投稿，只收 .docx，一人一份，重传即覆盖。
+    # 放在 STANDARD_MATERIAL_RULES 里是为了复用整条上传安全链路（文件名/魔数/MIME/ZIP
+    # 结构/额度/覆盖删除），不另开一套上传通道。
+    "news_document": {
+        "code": "news_document",
+        "title": "新闻稿",
+        "required": False,
+        "allowed_extensions": [".docx"],
+        "max_file_bytes": 20 * MB,
+        "min_count": 0,
+        "max_count": 1,
+    },
     "other_materials": {
         "code": "other_materials",
         "title": "其他证明材料",
@@ -135,6 +147,7 @@ STANDARD_MATERIAL_CODES = (
     "scene_photos",
     "video",
     "other_materials",
+    "news_document",
 )
 
 # 落盘目录名与类别 code 解耦：宣讲视频固定落在 <activity>/<student_number>/promotional_video/ 下。
@@ -202,7 +215,7 @@ def rule_max_file_bytes(code, extension):
     return effective_max_file_bytes(code, extension)
 
 
-SINGLE_FILE_MATERIAL_CODES = frozenset({"application_form", "practice_report", "video"})
+SINGLE_FILE_MATERIAL_CODES = frozenset({"application_form", "practice_report", "video", "news_document"})
 INLINE_PREVIEW_EXTENSIONS = frozenset({".pdf", ".jpg", ".jpeg", ".png"})
 
 EXTENSION_CONTENT_TYPES = {
