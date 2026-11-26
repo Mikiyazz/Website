@@ -14,6 +14,7 @@ from apps.audit.decorators import audit_rejections
 from apps.audit.services import record_rejection
 from apps.common.api import endpoint, json_body
 from apps.common.errors import DomainError
+from apps.uploads.models import FileAsset, UploadSession
 from apps.uploads.policies import STANDARD_MATERIAL_RULES, rule_max_file_bytes
 from apps.uploads.services import ensure_standard_material_requirements
 from .models import Submission
@@ -110,7 +111,15 @@ WIZARD_MATERIAL_CODES = (
 MB = 1024 * 1024
 
 
-def _build_wizard_material(code, requirements):
+def _format_file_size(num_bytes: int) -> str:
+    if num_bytes >= MB:
+        return f"{num_bytes / MB:.1f} MB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes} B"
+
+
+def _build_wizard_material(code, requirements, uploads=None):
     """Turn one material rule into the flat, JS-friendly payload used by the FilePond zones."""
     spec = STANDARD_MATERIAL_RULES.get(code)
     if not spec:
@@ -172,6 +181,19 @@ def _build_wizard_material(code, requirements):
         "is_image_zone": code == "scene_photos",
         "allow_image_preview": code == "scene_photos",
         "allow_video_preview": False,
+        # 向导必须知道"服务端已经传了几份"，否则刷新页面后 FilePond 会按 0 份重新计数，
+        # 用户继续上传就会撞到后端上限，失败项还会留在列表里占位，形成"一直传不上"的死循环。
+        "uploaded_count": len(uploads or []),
+        "existing_files": [
+            {
+                "id": str(up.id),
+                "name": up.original_name,
+                "size_display": _format_file_size(
+                    int(getattr(getattr(up, "fileasset", None), "actual_bytes", 0) or up.declared_bytes)
+                ),
+            }
+            for up in (uploads or [])
+        ],
     }
 
 
@@ -243,10 +265,24 @@ def apply(request):
         except DomainError as exc:
             context["error_message"] = str(exc)
 
+    uploads_by_code: dict[str, list] = {}
+    for up in (
+        UploadSession.objects.select_related("requirement", "fileasset")
+        .filter(
+            owner=user,
+            requirement__activity=selected_activity,
+            status=UploadSession.Status.COMPLETE,
+            fileasset__status=FileAsset.Status.VALID,
+        )
+        .order_by("created_at")
+    ):
+        uploads_by_code.setdefault(up.requirement.code, []).append(up)
+
     materials = [
         material
         for material in (
-            _build_wizard_material(code, requirements) for code in WIZARD_MATERIAL_CODES
+            _build_wizard_material(code, requirements, uploads_by_code.get(code))
+            for code in WIZARD_MATERIAL_CODES
         )
         if material
     ]
