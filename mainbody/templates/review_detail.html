@@ -1,201 +1,301 @@
 {% extends "base.html" %}
 {% block title %}申报审核详情 · {{ item.project_name|default:item.student_number }}{% endblock %}
 {% block content %}
-<div class="page-header mb-3">
-  <div class="row align-items-center g-2">
-    <div class="col">
-      <div class="page-pretitle">社会实践审核中心 · 申报详情</div>
-      <h2 class="page-title">{{ item.project_name|default:"（未命名项目）" }}</h2>
-    </div>
-    <div class="col-auto d-flex gap-2 align-items-center flex-wrap">
-      <span class="badge badge-{{ item.status }} fs-5" style="padding:5px 14px;">{{ item.status_display }}</span>
-      <a class="btn btn-sm btn-outline-secondary" href="/?activity_id={{ item.activity_id }}">返回审核列表</a>
-    </div>
+<div class="hero-editorial">
+  <div>
+    <div class="hero-greeting-eyebrow">社会实践审核中心 · 申报详情</div>
+    <h1 class="hero-greeting-title">{{ item.project_name|default:"（未命名项目）" }}</h1>
+    <p class="hero-greeting-sub">
+      {{ item.real_name|default:item.student_number }}（{{ item.student_number }}）· {{ item.class_name|default:"-" }} · {{ submission.activity.title }}
+    </p>
+  </div>
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <span class="badge badge-{{ item.status }}" style="padding: 8px 16px; font-size: 0.86rem;">{{ item.status_display }}</span>
+    <a class="btn btn-outline-secondary" href="/?activity_id={{ item.activity_id }}">返回审核列表</a>
   </div>
 </div>
 
-<!-- 1. 申报人与项目基础信息 -->
-<div class="card card-pad mb-4">
-  <h3 class="card-title mb-3">项目与申报人信息</h3>
-  <div class="row g-3">
-    <div class="col-12 col-md-6">
-      <p class="mb-1"><strong>学号：</strong>{{ item.student_number }}</p>
-      <p class="mb-1"><strong>姓名：</strong>{{ item.real_name|default:"-" }}</p>
-      <p class="mb-1"><strong>年级 / 专业：</strong>{{ item.grade|default:"-" }} / {{ item.major|default:"-" }}</p>
-      <p class="mb-1"><strong>班级：</strong>{{ item.class_name }}</p>
-      <p class="mb-1"><strong>手机号：</strong>{{ item.phone|default:"-" }}</p>
-    </div>
-    <div class="col-12 col-md-6">
-      <p class="mb-1"><strong>所属活动：</strong>{{ submission.activity.title }}</p>
-      <p class="mb-1"><strong>项目名称：</strong>{{ item.project_name|default:"-" }}</p>
-      <p class="mb-1"><strong>项目类别：</strong>{{ item.category|default:"-" }}</p>
-      <p class="mb-1"><strong>申报形式：</strong>{{ item.declaration_type_display }}</p>
-      <p class="mb-1"><strong>更新时间：</strong>{{ submission.updated_at|date:"Y-m-d H:i" }}</p>
-    </div>
-  </div>
-
-  {% if item.team_members %}
-  <div class="mt-3">
-    <h4 class="h4 mb-2">团队成员列表（共 {{ item.team_members|length }} 名队员）</h4>
-    <div class="table-responsive table-wrap">
-      <table class="table table-vcenter">
-        <thead>
-          <tr>
-            <th>队员学号</th>
-            <th>队员姓名</th>
-            <th>队员班级</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for tm in item.team_members %}
-          <tr>
-            <td>{{ tm.student_number }}</td>
-            <td>{{ tm.real_name }}</td>
-            <td>{{ tm.class_name }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-  {% endif %}
-</div>
-
-<!-- 2. 全部附件列表：PDF/图片提供浏览器新窗口在线预览，Word/视频提供下载查看 -->
-<div class="card card-pad mb-4" id="review-attachments-section">
-  <h3 class="card-title mb-3">全部附件列表（{{ item.attachments|length }} 份）</h3>
-  <ul class="uploaded-file-list">
-    {% for att in item.attachments %}
-    <li class="uploaded-file-item">
-      <div>
-        <span class="badge badge-optional">{{ att.requirement_title }}</span>
-        <strong class="ms-2">{{ att.original_name }}</strong>
-        <span class="small text-secondary ms-1">（{{ att.extension }}）</span>
+<div class="row g-4">
+  <!-- 左侧主区：基础信息 + 附件清单 + 历史记录 -->
+  <div class="col-12 col-lg-8 d-flex flex-column gap-4">
+    <div class="card card-pad">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3 class="card-title mb-0">项目与申报人信息</h3>
+        <span class="small text-secondary tabular-nums">更新于 {{ submission.updated_at|date:"Y-m-d H:i" }}</span>
       </div>
-      <div class="d-flex gap-2 align-items-center flex-wrap">
-        {% if att.can_inline_preview %}
-        <a class="btn btn-sm btn-outline-secondary preview-online-btn"
-           href="{{ att.preview_url }}"
-           target="_blank"
-           rel="noopener">
-          浏览器新窗口在线预览
-        </a>
-        <a class="btn btn-sm btn-outline-secondary" href="{{ att.download_url }}">下载文件</a>
-        {% else %}
-        <a class="btn btn-sm btn-outline-secondary download-only-btn" href="{{ att.download_url }}">下载查看</a>
-        {% endif %}
+      <div class="row g-3">
+        <div class="col-12 col-md-6">
+          <div class="bento-nested h-100">
+            <p class="mb-2"><strong>学号：</strong><span class="tabular-nums">{{ item.student_number }}</span></p>
+            <p class="mb-2"><strong>姓名：</strong>{{ item.real_name|default:"-" }}</p>
+            <p class="mb-2"><strong>年级 / 专业：</strong>{{ item.grade|default:"-" }} / {{ item.major|default:"-" }}</p>
+            <p class="mb-2"><strong>班级：</strong>{{ item.class_name }}</p>
+            <p class="mb-0"><strong>手机号：</strong><span class="tabular-nums">{{ item.phone|default:"-" }}</span></p>
+          </div>
+        </div>
+        <div class="col-12 col-md-6">
+          <div class="bento-nested h-100">
+            <p class="mb-2"><strong>所属活动：</strong>{{ submission.activity.title }}</p>
+            <p class="mb-2"><strong>项目名称：</strong>{{ item.project_name|default:"-" }}</p>
+            <p class="mb-2"><strong>项目类别：</strong>{{ item.category|default:"-" }}</p>
+            <p class="mb-0"><strong>申报形式：</strong>{{ item.declaration_type_display }}</p>
+          </div>
+        </div>
       </div>
-    </li>
-    {% empty %}
-    <li class="small text-secondary" style="list-style:none; padding:12px 0;">该申报暂未上传有效附件。</li>
-    {% endfor %}
-  </ul>
-</div>
 
-<!-- 3. 审核操作区 -->
-<div class="card card-pad mb-4" id="review-action-section">
-  <h3 class="card-title mb-3">审核操作区</h3>
-  {% if item.can_first_review or item.can_final_review %}
-  <form method="post"
-        action="{% url 'review-submission-action' item.id %}"
-        id="detail-review-form"
-        onsubmit="return validateDetailReviewForm(this)">
-    {% csrf_token %}
-    <input type="hidden" name="activity_id" value="{{ item.activity_id }}">
-    <input type="hidden" name="next" value="{% url 'review-submission-detail' item.id %}">
-    <input type="hidden" name="decision" id="detail_decision_input" value="approved">
-
-    <div class="mb-3 form-row">
-      <label class="form-label" for="detail_comment_textarea">
-        审核意见（点击“打回修改”时<strong>必须填写打回意见</strong>，为空严禁提交）
-      </label>
-      <textarea class="form-control"
-                name="comment"
-                id="detail_comment_textarea"
-                rows="3"
-                placeholder="请填写审核意见；若打回修改，请写明具体问题及修改要求..."></textarea>
-    </div>
-
-    <div class="d-flex flex-wrap gap-2">
-      {% if item.can_first_review %}
-      <button type="submit"
-              class="btn btn-success"
-              onclick="document.getElementById('detail_decision_input').value='approved'">
-        初审通过
-      </button>
-      <button type="submit"
-              class="btn btn-danger"
-              onclick="document.getElementById('detail_decision_input').value='returned'">
-        打回修改
-      </button>
-      {% elif item.can_final_review %}
-      <button type="submit"
-              class="btn btn-success"
-              onclick="document.getElementById('detail_decision_input').value='approved'">
-        终审通过
-      </button>
-      <button type="submit"
-              class="btn btn-danger"
-              onclick="document.getElementById('detail_decision_input').value='returned'">
-        打回修改
-      </button>
+      {% if item.team_members %}
+      <div class="mt-4">
+        <h4 class="h4 mb-2">团队成员列表（共 {{ item.team_members|length }} 名队员）</h4>
+        <div class="table-responsive">
+          <table class="table table-vcenter">
+            <thead>
+              <tr>
+                <th>队员学号</th>
+                <th>队员姓名</th>
+                <th>队员班级</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for tm in item.team_members %}
+              <tr>
+                <td class="tabular-nums">{{ tm.student_number }}</td>
+                <td><strong>{{ tm.real_name }}</strong></td>
+                <td>{{ tm.class_name }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
       {% endif %}
     </div>
-  </form>
-  {% else %}
-  <p class="text-secondary mb-0">当前申报状态为【{{ item.status_display }}】，不在当前账号的可执行审核阶段。</p>
-  {% endif %}
+
+    <div class="card card-pad" id="review-attachments-section">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h3 class="card-title mb-0">全部附件列表（{{ item.attachments|length }} 份）</h3>
+      </div>
+      <ul class="uploaded-file-list">
+        {% for att in item.attachments %}
+        <li class="uploaded-file-item">
+          <div>
+            <span class="badge badge-optional">{{ att.requirement_title }}</span>
+            <strong class="ms-2">{{ att.original_name }}</strong>
+            <span class="small text-secondary ms-1">（{{ att.extension }}）</span>
+          </div>
+          <div class="d-flex gap-2 align-items-center flex-wrap">
+            {% if att.can_inline_preview %}
+            <a class="btn btn-sm btn-outline-secondary preview-online-btn"
+               href="{{ att.preview_url }}"
+               target="_blank"
+               rel="noopener">
+              浏览器新窗口在线预览
+            </a>
+            <a class="btn btn-sm btn-outline-secondary" href="{{ att.download_url }}">下载文件</a>
+            {% else %}
+            <a class="btn btn-sm btn-outline-secondary download-only-btn" href="{{ att.download_url }}">下载查看</a>
+            {% endif %}
+          </div>
+        </li>
+        {% empty %}
+        <li class="small text-secondary py-2">该申报暂未上传有效附件。</li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div class="card card-pad">
+      <h3 class="card-title mb-3">历史审核记录</h3>
+      <div class="table-responsive">
+        <table class="table table-vcenter">
+          <thead>
+            <tr>
+              <th>阶段</th>
+              <th>结论</th>
+              <th>审核意见</th>
+              <th>审核人</th>
+              <th>时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for rec in item.review_records %}
+            <tr>
+              <td>{{ rec.stage_display }}</td>
+              <td>
+                <span class="badge {% if rec.decision == 'approved' %}badge-final_approved{% else %}badge-returned{% endif %}">
+                  {{ rec.decision_display }}
+                </span>
+              </td>
+              <td>{{ rec.comment|default:"（无附加意见）" }}</td>
+              <td>{{ rec.reviewer_name }}</td>
+              <td class="tabular-nums small text-secondary">{{ rec.created_at }}</td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="5" class="text-secondary text-center py-4">暂无历史审核记录。</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右侧炭黑高对比审核操作锚点卡 -->
+  <div class="col-12 col-lg-4">
+    <div class="charcoal-anchor-card sticky-lg-top" style="top: 20px;" id="review-action-section">
+      <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+          <div class="small charcoal-muted">审核结论面板</div>
+          <h3 class="card-title mb-0 mt-1">审核操作区</h3>
+        </div>
+        <a class="card-corner-btn" href="/?activity_id={{ item.activity_id }}" title="返回列表">↗</a>
+      </div>
+      {% if item.can_first_review or item.can_final_review or item.can_return_approved %}
+      <form method="post"
+            action="{% url 'review-submission-action' item.id %}"
+            id="detail-review-form"
+            data-requires-confirm="{% if item.requires_return_confirm %}true{% else %}false{% endif %}"
+            data-status-label="{{ item.status_display }}"
+            data-project-name="{{ item.project_name|default:'未命名项目' }}"
+            onsubmit="return validateDetailReviewForm(this)">
+        {% csrf_token %}
+        <input type="hidden" name="activity_id" value="{{ item.activity_id }}">
+        <input type="hidden" name="next" value="{% url 'review-submission-detail' item.id %}">
+        <input type="hidden" name="decision" id="detail_decision_input" value="{% if item.can_first_review or item.can_final_review %}approved{% else %}returned{% endif %}">
+        <input type="hidden" name="confirm_return" id="detail_confirm_return_input" value="">
+
+        <div class="mb-3">
+          <label class="form-label text-light" for="detail_comment_textarea">
+            审核意见（打回修改时<strong>必须填写打回意见</strong>）
+          </label>
+          <textarea class="form-control"
+                    name="comment"
+                    id="detail_comment_textarea"
+                    rows="4"
+                    style="background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.16); color: #F7F6F2;"
+                    placeholder="请填写审核意见；若打回修改，请写明具体问题及修改要求..."></textarea>
+        </div>
+
+        <div class="d-flex flex-column gap-2">
+          {% if item.can_first_review %}
+          <button type="submit"
+                  class="btn btn-amber w-100"
+                  onclick="document.getElementById('detail_decision_input').value='approved'">
+            初审通过
+          </button>
+          <button type="submit"
+                  class="btn btn-danger w-100"
+                  onclick="document.getElementById('detail_decision_input').value='returned'">
+            打回修改
+          </button>
+          {% elif item.can_final_review %}
+          <button type="submit"
+                  class="btn btn-amber w-100"
+                  onclick="document.getElementById('detail_decision_input').value='approved'">
+            终审通过
+          </button>
+          <button type="submit"
+                  class="btn btn-danger w-100"
+                  onclick="document.getElementById('detail_decision_input').value='returned'">
+            打回修改
+          </button>
+          {% elif item.can_return_approved %}
+          <button type="submit"
+                  class="btn btn-danger w-100"
+                  onclick="document.getElementById('detail_decision_input').value='returned'">
+            打回修改
+          </button>
+          {% endif %}
+        </div>
+      </form>
+      {% else %}
+      <div class="charcoal-check-item mt-3">
+        <div class="charcoal-check-meta">
+          <span class="charcoal-check-title">当前状态：{{ item.status_display }}</span>
+          <span class="charcoal-check-sub">当前无需执行审核操作。</span>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
 </div>
 
-<!-- 4. 审核历史记录 -->
-<div class="card card-pad mb-4">
-  <h3 class="card-title mb-3">历史审核记录</h3>
-  <div class="table-responsive table-wrap">
-    <table class="table table-vcenter">
-      <thead>
-        <tr>
-          <th>阶段</th>
-          <th>结论</th>
-          <th>审核意见</th>
-          <th>审核人</th>
-          <th>时间</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for rec in item.review_records %}
-        <tr>
-          <td>{{ rec.stage_display }}</td>
-          <td>
-            <span class="badge {% if rec.decision == 'approved' %}badge-final_approved{% else %}badge-returned{% endif %}">
-              {{ rec.decision_display }}
-            </span>
-          </td>
-          <td>{{ rec.comment|default:"（无附加意见）" }}</td>
-          <td>{{ rec.reviewer_name }}</td>
-          <td>{{ rec.created_at }}</td>
-        </tr>
-        {% empty %}
-        <tr>
-          <td colspan="5" class="text-secondary">暂无历史审核记录。</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<!-- 已通过成果打回二次确认弹窗 -->
+<div class="modal modal-blur fade" id="detailReturnConfirmModal" tabindex="-1" aria-labelledby="detailReturnConfirmTitle" aria-hidden="true">
+  <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="detailReturnConfirmTitle">确认打回已通过成果</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2 small text-secondary" id="detailReturnConfirmDesc"></p>
+        <div class="small p-2 rounded-3 bg-light" id="detailReturnConfirmComment"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+        <button type="button" class="btn btn-danger btn-sm" id="btnConfirmDetailReturn">确认打回</button>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
-function validateDetailReviewForm(formEl) {
-  var decInput = document.getElementById("detail_decision_input");
-  var commentEl = document.getElementById("detail_comment_textarea");
-  var decision = decInput ? decInput.value : "approved";
-  var comment = commentEl ? commentEl.value.trim() : "";
-  if (decision === "returned" && !comment) {
-    window.alert("打回修改时必须填写打回意见，原因不能为空！");
-    if (commentEl) commentEl.focus();
-    return false;
+(function () {
+  "use strict";
+  var pendingDetailForm = null;
+
+  window.validateDetailReviewForm = function (formEl) {
+    var decInput = document.getElementById("detail_decision_input");
+    var commentEl = document.getElementById("detail_comment_textarea");
+    var confirmInput = document.getElementById("detail_confirm_return_input");
+    var decision = decInput ? decInput.value : "approved";
+    var comment = commentEl ? commentEl.value.trim() : "";
+
+    if (decision === "returned" && !comment) {
+      window.alert("打回修改时必须填写打回意见，原因不能为空！");
+      if (commentEl) commentEl.focus();
+      return false;
+    }
+
+    var needsConfirm = formEl && formEl.getAttribute("data-requires-confirm") === "true";
+    if (decision === "returned" && needsConfirm && (!confirmInput || confirmInput.value !== "1")) {
+      var statusLabel = formEl.getAttribute("data-status-label") || "已通过";
+      var projName = formEl.getAttribute("data-project-name") || "该申报";
+      var tip = "「" + projName + "」当前为【" + statusLabel + "】，打回后学生将恢复修改权限并需重新审核，确定打回吗？";
+      var modalEl = document.getElementById("detailReturnConfirmModal");
+      if (modalEl && window.bootstrap && window.bootstrap.Modal) {
+        var descEl = document.getElementById("detailReturnConfirmDesc");
+        var cmtEl = document.getElementById("detailReturnConfirmComment");
+        if (descEl) { descEl.textContent = tip; }
+        if (cmtEl) { cmtEl.textContent = "打回意见：" + comment; }
+        pendingDetailForm = formEl;
+        window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        return false;
+      }
+      if (!window.confirm(tip)) {
+        return false;
+      }
+      if (confirmInput) { confirmInput.value = "1"; }
+    }
+    return true;
+  };
+
+  var confirmBtn = document.getElementById("btnConfirmDetailReturn");
+  if (confirmBtn) {
+    confirmBtn.addEventListener("click", function () {
+      var confirmInput = document.getElementById("detail_confirm_return_input");
+      var modalEl = document.getElementById("detailReturnConfirmModal");
+      if (modalEl && window.bootstrap && window.bootstrap.Modal) {
+        window.bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+      }
+      if (pendingDetailForm) {
+        if (confirmInput) { confirmInput.value = "1"; }
+        var targetForm = pendingDetailForm;
+        pendingDetailForm = null;
+        targetForm.submit();
+      }
+    });
   }
-  return true;
-}
+})();
 </script>
 {% endblock %}

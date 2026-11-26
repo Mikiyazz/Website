@@ -23,3 +23,7 @@ Thumbs.db
 .skills/
 .claude/
 .citadel/
+
+# ---- 浏览器调试/配置数据（含隐私，严禁入库）----
+.edge_debug/
+.edge_profile/

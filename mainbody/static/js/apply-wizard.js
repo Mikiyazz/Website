@@ -10,24 +10,41 @@
     return;
   }
 
+  var WIZARD_MODE = wizard.dataset.wizardMode || 'declaration';
   var MATERIALS = readJson('wizard-materials-json', []);
   var INITIAL_MEMBERS = readJson('wizard-team-json', []);
+  var DECLARE_URL = wizard.dataset.declareUrl || '';
   var SUBMIT_URL = wizard.dataset.submitUrl || '';
   var DETAIL_URL = wizard.dataset.detailUrl || '';
+  var OUTCOMES_URL = wizard.dataset.outcomesUrl || '';
   var SUCCESS_URL = wizard.dataset.successUrl || '';
   var LOOKUP_URL = wizard.dataset.lookupUrl || '/api/students/lookup/';
   var CSRF_TOKEN = (document.getElementById('apply-csrf-token') || {}).value || '';
   var CAN_SUBMIT = wizard.dataset.canSubmit === 'true';
+  var DECLARATION_SUBMITTED = wizard.dataset.declarationSubmitted === 'true';
+  var currentVersion = parseInt(wizard.dataset.version || '0', 10) || 0;
   // 上传通道：宣讲视频走 5MB 分片，其余材料单请求直传（服务端 URL 全部由模板注入）。
   var CHUNK_START_URL = wizard.dataset.chunkStartUrl || '/api/v1/uploads/chunk-start/';
   var CHUNK_UPLOAD_URL = wizard.dataset.chunkUploadUrl || '/api/v1/uploads/chunk-upload/';
   var CHUNK_COMPLETE_URL = wizard.dataset.chunkCompleteUrl || '/api/v1/uploads/chunk-complete/';
   var DIRECT_UPLOAD_URL = wizard.dataset.directUploadUrl || '/api/v1/uploads/direct-upload/';
   var ACTIVITY_ID = wizard.dataset.activityId || '';
+  var SUBMISSION_ID = wizard.dataset.submissionId || '';
   var UPLOAD_LOCKED = wizard.dataset.uploadLocked === 'true';
   var CHUNK_SIZE = 5 * 1024 * 1024;
   var uploadJobs = {};
   var uploadSeq = 0;
+  var savedUploadsByCode = {};
+  MATERIALS.forEach(function (m) {
+    savedUploadsByCode[m.code] = Array.isArray(m.uploads) ? m.uploads.slice() : [];
+  });
+
+  function notifyUploadsChanged() {
+    document.dispatchEvent(new CustomEvent('apply:uploads-changed'));
+    if (typeof currentStep !== 'undefined' && currentStep === 4 && typeof renderSummary === 'function') {
+      renderSummary();
+    }
+  }
 
   var MIME_BY_EXT = {
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -97,10 +114,20 @@
         link.removeAttribute('aria-current');
       }
     });
-    btnPrev.disabled = target === 1;
-    btnNext.classList.toggle('d-none', target === TOTAL_STEPS);
+    if (btnPrev) {
+      btnPrev.disabled = target === 1;
+    }
+    if (btnNext) {
+      btnNext.classList.toggle('d-none', target === TOTAL_STEPS);
+    }
     if (stepIndicator) {
       stepIndicator.textContent = '第 ' + target + ' / ' + TOTAL_STEPS + ' 步';
+    }
+    if (target === 3) {
+      // 切换到 Step 3 附件上传时，促使 FilePond 重新计算从 d-none 恢复后的视口矩形尺寸
+      window.setTimeout(function () {
+        window.dispatchEvent(new Event('resize'));
+      }, 50);
     }
     if (target === 4) {
       renderSummary();
@@ -115,18 +142,23 @@
     });
   });
 
-  btnPrev.addEventListener('click', function () {
-    showStep(currentStep - 1, { skipValidation: true });
-  });
+  if (btnPrev) {
+    btnPrev.addEventListener('click', function () {
+      showStep(currentStep - 1, { skipValidation: true });
+    });
+  }
 
-  btnNext.addEventListener('click', function () {
-    showStep(currentStep + 1);
-  });
+  if (btnNext) {
+    btnNext.addEventListener('click', function () {
+      showStep(currentStep + 1);
+    });
+  }
 
   /* ------------------------------------------------------------------
    * Step 1 校验
    * ------------------------------------------------------------------ */
   var fieldProjectName = document.getElementById('field-project-name');
+  var fieldCategory = document.getElementById('field-category');
   var fieldAdvisor = document.getElementById('field-advisor');
   var fieldPlace = document.getElementById('field-place');
   var fieldDateStart = document.getElementById('field-date-start');
@@ -150,6 +182,18 @@
       flag(input, valid);
       ok = ok && valid;
     });
+    if (fieldCategory) {
+      var selectedOption = fieldCategory.options && fieldCategory.selectedIndex >= 0
+        ? fieldCategory.options[fieldCategory.selectedIndex]
+        : null;
+      var categoryValid = Boolean(
+        String(fieldCategory.value || '').trim() &&
+        !(selectedOption && selectedOption.disabled)
+      );
+      fieldCategory.classList.toggle('is-invalid', !categoryValid);
+      fieldCategory.classList.toggle('is-valid', categoryValid);
+      ok = ok && categoryValid;
+    }
     var start = fieldDateStart.value;
     var end = fieldDateEnd.value;
     var datesValid = Boolean(start && end && end >= start);
@@ -162,7 +206,7 @@
   }
 
   function refreshDateSpan() {
-    if (!dateSpanHint) {
+    if (!dateSpanHint || !fieldDateStart || !fieldDateEnd) {
       return;
     }
     var start = fieldDateStart.value;
@@ -174,8 +218,12 @@
       dateSpanHint.textContent = '';
     }
   }
-  fieldDateStart.addEventListener('change', refreshDateSpan);
-  fieldDateEnd.addEventListener('change', refreshDateSpan);
+  if (fieldDateStart) {
+    fieldDateStart.addEventListener('change', refreshDateSpan);
+  }
+  if (fieldDateEnd) {
+    fieldDateEnd.addEventListener('change', refreshDateSpan);
+  }
 
   /* ------------------------------------------------------------------
    * Step 2 申报模式与队员行
@@ -194,6 +242,9 @@
   }
 
   function applyDeclarationMode() {
+    if (!individualNotice || !teamBlock || !membersBox) {
+      return;
+    }
     var team = isTeamMode();
     // 个人申报：Step 2 主体整块灰掉（仅保留顶部模式单选可操作）并显示提示
     if (stepTwoBody) {
@@ -201,7 +252,7 @@
     }
     individualNotice.classList.toggle('d-none', team);
     teamBlock.classList.toggle('d-none', !team);
-    if (team && !membersBox.children.length) {
+    if (team && !membersBox.children.length && !UPLOAD_LOCKED) {
       addMemberRow();
     }
   }
@@ -214,28 +265,56 @@
     var row = fragment.querySelector('.team-member-row');
     var numberInput = row.querySelector('.member-student-number');
     var nameInput = row.querySelector('.member-real-name');
+    var classInput = row.querySelector('.member-class-name');
     var errorHint = row.querySelector('.member-lookup-error');
     var removeBtn = row.querySelector('.member-remove');
 
     if (preset) {
       numberInput.value = preset.student_number || '';
       nameInput.value = preset.real_name || '';
+      if (classInput) {
+        classInput.value = preset.class_name || '';
+      }
     }
 
-    numberInput.addEventListener('blur', function () {
-      lookupStudent(numberInput, nameInput, errorHint);
-    });
-    numberInput.addEventListener('input', function () {
-      nameInput.value = '';
-      errorHint.classList.add('d-none');
-      numberInput.classList.remove('is-invalid');
-    });
-    removeBtn.addEventListener('click', function () {
-      row.remove();
-      if (!membersBox.children.length && isTeamMode()) {
-        addMemberRow();
+    if (UPLOAD_LOCKED) {
+      numberInput.disabled = true;
+      numberInput.readOnly = true;
+      nameInput.disabled = true;
+      nameInput.readOnly = true;
+      if (classInput) {
+        classInput.disabled = true;
+        classInput.readOnly = true;
       }
-    });
+      if (removeBtn) {
+        removeBtn.disabled = true;
+        removeBtn.classList.add('d-none');
+      }
+    } else {
+      numberInput.addEventListener('blur', function () {
+        lookupStudent(numberInput, nameInput, classInput, errorHint);
+      });
+      numberInput.addEventListener('input', function () {
+        nameInput.value = '';
+        if (classInput) {
+          classInput.value = '';
+          classInput.classList.remove('is-invalid');
+        }
+        errorHint.classList.add('d-none');
+        numberInput.classList.remove('is-invalid');
+      });
+      if (classInput) {
+        classInput.addEventListener('input', function () {
+          classInput.classList.remove('is-invalid');
+        });
+      }
+      removeBtn.addEventListener('click', function () {
+        row.remove();
+        if (!membersBox.children.length && isTeamMode()) {
+          addMemberRow();
+        }
+      });
+    }
 
     membersBox.appendChild(fragment);
     return numberInput;
@@ -243,10 +322,13 @@
 
   var lookupCache = {};
 
-  function lookupStudent(numberInput, nameInput, errorHint) {
+  function lookupStudent(numberInput, nameInput, classInput, errorHint) {
     var studentNumber = String(numberInput.value || '').trim();
     if (!studentNumber) {
       nameInput.value = '';
+      if (classInput) {
+        classInput.value = '';
+      }
       errorHint.classList.add('d-none');
       return;
     }
@@ -254,7 +336,11 @@
     errorHint.classList.add('d-none');
 
     if (lookupCache[studentNumber]) {
-      nameInput.value = lookupCache[studentNumber];
+      nameInput.value = lookupCache[studentNumber].real_name || '';
+      if (classInput && lookupCache[studentNumber].class_name) {
+        classInput.value = lookupCache[studentNumber].class_name;
+        classInput.classList.remove('is-invalid');
+      }
       return;
     }
 
@@ -269,10 +355,18 @@
       .then(function (data) {
         if (data && data.exists && data.real_name) {
           nameInput.value = data.real_name;
-          lookupCache[studentNumber] = data.real_name;
+          if (classInput && data.class_name) {
+            classInput.value = data.class_name;
+            classInput.classList.remove('is-invalid');
+          }
+          lookupCache[studentNumber] = {
+            real_name: data.real_name,
+            class_name: data.class_name || ''
+          };
         } else {
           nameInput.value = '';
           numberInput.classList.add('is-invalid');
+          errorHint.textContent = '未查询到该学号的在校学生。';
           errorHint.classList.remove('d-none');
         }
       })
@@ -286,16 +380,23 @@
 
   if (btnAddMember) {
     btnAddMember.addEventListener('click', function () {
+      if (UPLOAD_LOCKED) {
+        return;
+      }
       var input = addMemberRow();
       if (input) {
         input.focus();
       }
     });
   }
-  radioIndividual.addEventListener('change', applyDeclarationMode);
-  radioTeam.addEventListener('change', applyDeclarationMode);
+  if (radioIndividual) {
+    radioIndividual.addEventListener('change', applyDeclarationMode);
+  }
+  if (radioTeam) {
+    radioTeam.addEventListener('change', applyDeclarationMode);
+  }
 
-  if (Array.isArray(INITIAL_MEMBERS) && INITIAL_MEMBERS.length) {
+  if (membersBox && Array.isArray(INITIAL_MEMBERS) && INITIAL_MEMBERS.length) {
     INITIAL_MEMBERS.forEach(function (member) {
       addMemberRow(member);
     });
@@ -303,12 +404,14 @@
 
   function collectMembers() {
     return Array.prototype.slice.call(membersBox.querySelectorAll('.team-member-row')).map(function (row) {
+      var classEl = row.querySelector('.member-class-name');
       return {
         student_number: String(row.querySelector('.member-student-number').value || '').trim(),
-        real_name: String(row.querySelector('.member-real-name').value || '').trim()
+        real_name: String(row.querySelector('.member-real-name').value || '').trim(),
+        class_name: String((classEl && classEl.value) || '').trim()
       };
     }).filter(function (member) {
-      return member.student_number || member.real_name;
+      return member.student_number || member.real_name || member.class_name;
     });
   }
 
@@ -321,8 +424,10 @@
     Array.prototype.forEach.call(membersBox.querySelectorAll('.team-member-row'), function (row) {
       var numberInput = row.querySelector('.member-student-number');
       var nameInput = row.querySelector('.member-real-name');
+      var classInput = row.querySelector('.member-class-name');
       var number = String(numberInput.value || '').trim();
       var name = String(nameInput.value || '').trim();
+      var cls = String((classInput && classInput.value) || '').trim();
       if (!number) {
         invalid = true;
         numberInput.classList.add('is-invalid');
@@ -330,6 +435,10 @@
       if (!name) {
         invalid = true;
         row.querySelector('.member-lookup-error').classList.remove('d-none');
+      }
+      if (classInput && !cls) {
+        invalid = true;
+        classInput.classList.add('is-invalid');
       }
     });
     return !invalid;
@@ -385,15 +494,48 @@
     return 0;
   }
 
-  function currentExtensionCount(code, filename) {
-    var pond = ponds[code];
-    if (!pond) {
-      return 0;
+  function syncSavedUploadDom(code) {
+    var list = savedUploadsByCode[code] || [];
+    var countNode = document.querySelector('[data-saved-uploads-count="' + code + '"]');
+    if (countNode) {
+      countNode.textContent = String(list.length);
     }
+    var wrap = document.querySelector('[data-saved-uploads-wrap="' + code + '"]');
+    if (wrap) {
+      wrap.classList.toggle('d-none', list.length === 0);
+    }
+  }
+
+  function removeSavedUploadsByIds(code, ids) {
+    if (!code || !Array.isArray(ids) || !ids.length) {
+      return;
+    }
+    var idSet = {};
+    ids.forEach(function (id) {
+      idSet[String(id)] = true;
+      var li = document.querySelector('[data-saved-uploads-list="' + code + '"] [data-saved-upload-id="' + id + '"]');
+      if (li && li.parentNode) {
+        li.parentNode.removeChild(li);
+      }
+    });
+    savedUploadsByCode[code] = (savedUploadsByCode[code] || []).filter(function (item) {
+      return !idSet[String(item.id)];
+    });
+    syncSavedUploadDom(code);
+  }
+
+  function currentExtensionCount(code, filename) {
     var ext = extOf(filename);
-    return pond.getFiles().filter(function (item) {
-      return extOf(item.file && item.file.name) === ext;
+    var savedCount = (savedUploadsByCode[code] || []).filter(function (item) {
+      return extOf(item.original_name) === ext;
     }).length;
+    var pond = ponds[code];
+    var pondCount = pond
+      ? pond.getFiles().filter(function (item) {
+          return extOf(item.file && item.file.name) === ext;
+        }).length
+      : 0;
+    return savedCount + pondCount;
   }
 
   // 单份上限按扩展名分档：例如 other_materials 里 .zip 允许 2000MB，
@@ -445,13 +587,23 @@
       // 真正的 File 对象在 item.file 上，name/size 都要从那里取。
       beforeAddFile: function (item) {
         var file = (item && item.file) || item || {};
-        var countCap = extensionCountCap(config, file.name);
-        if (countCap && currentExtensionCount(config.code, file.name) + 1 > countCap) {
-          window.alert(
-            '「' + config.title + '」中 ' + extOf(file.name).replace('.', '').toUpperCase() +
-            ' 文件最多 ' + countCap + ' 份，请先移除已上传的文件。'
-          );
-          return false;
+        if (config.max_count > 1) {
+          var existingTotal = (savedUploadsByCode[config.code] || []).length + (ponds[config.code] ? ponds[config.code].getFiles().length : 0);
+          if (existingTotal + 1 > config.max_count) {
+            window.alert(
+              '「' + config.title + '」最多上传 ' + config.max_count +
+              ' 份，当前已有 ' + existingTotal + ' 份，请先删除不需要的已有材料。'
+            );
+            return false;
+          }
+          var countCap = extensionCountCap(config, file.name);
+          if (countCap && currentExtensionCount(config.code, file.name) + 1 > countCap) {
+            window.alert(
+              '「' + config.title + '」中 ' + extOf(file.name).replace('.', '').toUpperCase() +
+              ' 文件最多 ' + countCap + ' 份，请先移除已上传的文件。'
+            );
+            return false;
+          }
         }
         if (!config.extension_limits || !config.extension_limits.length) {
           return true;
@@ -475,13 +627,44 @@
       // 选完文件立即上传：视频每一片 5MB 单独成请求，页面顶部进度条实时汇总。
       instantUpload: !UPLOAD_LOCKED,
       disabled: UPLOAD_LOCKED,
-      server: { process: makeUploadProcess(config) },
+      server: {
+        process: makeUploadProcess(config),
+        revert: function (uniqueFileId, load, error) {
+          if (!uniqueFileId || UPLOAD_LOCKED) {
+            load();
+            return;
+          }
+          fetch('/api/v1/uploads/' + encodeURIComponent(uniqueFileId) + '/delete/', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              'X-CSRFToken': CSRF_TOKEN,
+              'X-Requested-With': 'XMLHttpRequest'
+            }
+          })
+            .then(function (resp) {
+              return resp.json().catch(function () { return {}; }).then(function (data) {
+                if (!resp.ok || data.error) {
+                  throw new Error((data.error && data.error.message) || '撤销上传失败');
+                }
+                load();
+                notifyUploadsChanged();
+              });
+            })
+            .catch(function (err) {
+              error(err && err.message ? err.message : '撤销上传失败');
+            });
+        }
+      },
       labelIdle: FilePondLocaleIdle(config)
     };
     return options;
   }
 
   function FilePondLocaleIdle(config) {
+    if (UPLOAD_LOCKED) {
+      return '<span class="text-secondary fw-bold">当前申报已只读锁定，不可上传或修改此项材料</span>';
+    }
     var hint = config.required
       ? config.count_hint
       : '选交，最多 ' + config.max_count + ' 份';
@@ -657,7 +840,10 @@
 
   function directUpload(config, file, load, error, progress) {
     var job = startUploadJob(file.size);
-    var request = postForm(DIRECT_UPLOAD_URL, { requirement_id: config.requirement_id }, {
+    var request = postForm(DIRECT_UPLOAD_URL, {
+      requirement_id: config.requirement_id,
+      submission_id: SUBMISSION_ID
+    }, {
       field: 'file',
       value: file,
       name: file.name
@@ -673,7 +859,17 @@
           progress(true, file.size, file.size);
         }
         finishUploadJob(job);
-        load(String((res.data && res.data.upload_id) || (res.data && res.data.id) || file.name));
+        var newId = String((res.data && res.data.upload_id) || (res.data && res.data.id) || file.name);
+        if (res && res.data && Array.isArray(res.data.replaced_upload_ids) && res.data.replaced_upload_ids.length) {
+          removeSavedUploadsByIds(config.code, res.data.replaced_upload_ids);
+        } else if (config && config.max_count === 1 && (savedUploadsByCode[config.code] || []).length) {
+          var oldIds = savedUploadsByCode[config.code]
+            .map(function (item) { return String(item.id); })
+            .filter(function (id) { return id && id !== newId; });
+          removeSavedUploadsByIds(config.code, oldIds);
+        }
+        load(newId);
+        notifyUploadsChanged();
       })
       .catch(function (err) {
         finishUploadJob(job);
@@ -753,7 +949,8 @@
       file_size: file.size,
       total_chunks: Math.max(1, Math.ceil(file.size / CHUNK_SIZE)),
       requirement_id: config.requirement_id,
-      activity_id: ACTIVITY_ID
+      activity_id: ACTIVITY_ID,
+      submission_id: SUBMISSION_ID
     }).promise
       .then(function (res) {
         var data = (res && res.data) || {};
@@ -782,7 +979,17 @@
           progress(true, file.size, file.size);
         }
         finishUploadJob(job);
-        load(String((res && res.data && res.data.upload_id) || uploadId));
+        var finalId = String((res && res.data && res.data.upload_id) || uploadId);
+        if (res && res.data && Array.isArray(res.data.replaced_upload_ids) && res.data.replaced_upload_ids.length) {
+          removeSavedUploadsByIds(config.code, res.data.replaced_upload_ids);
+        } else if (config && config.max_count === 1 && (savedUploadsByCode[config.code] || []).length) {
+          var oldIds = savedUploadsByCode[config.code]
+            .map(function (item) { return String(item.id); })
+            .filter(function (id) { return id && id !== finalId; });
+          removeSavedUploadsByIds(config.code, oldIds);
+        }
+        load(finalId);
+        notifyUploadsChanged();
       })
       .catch(function (err) {
         finishUploadJob(job);
@@ -802,7 +1009,24 @@
       if (!input) {
         return;
       }
-      ponds[config.code] = window.FilePond.create(input, buildZoneOptions(config));
+      var pond = window.FilePond.create(input, buildZoneOptions(config));
+      ponds[config.code] = pond;
+
+      // 点击上传卡片任何空白区域均可唤起系统文件选择框，防止由于点击偏差导致误以为无法打开
+      var card = document.querySelector('[data-material-card="' + config.code + '"]');
+      if (card) {
+        card.addEventListener('click', function (evt) {
+          if (UPLOAD_LOCKED) {
+            return;
+          }
+          if (evt.target.closest('a, button, .filepond--file-action-button, .filepond--item, .filepond--label-action, input[type="file"]')) {
+            return;
+          }
+          if (pond && typeof pond.browse === 'function') {
+            pond.browse();
+          }
+        });
+      }
     });
   }
 
@@ -823,8 +1047,51 @@
   }
 
   function countOf(code) {
-    return ponds[code] ? ponds[code].getFiles().length : 0;
+    var savedCount = (savedUploadsByCode[code] || []).length;
+    var pondCount = ponds[code] ? ponds[code].getFiles().length : 0;
+    return savedCount + pondCount;
   }
+
+  // 已保存材料列表删除按钮事件委托
+  wizard.addEventListener('click', function (evt) {
+    var btn = evt.target && evt.target.closest ? evt.target.closest('.btn-delete-saved-upload') : null;
+    if (!btn || UPLOAD_LOCKED) {
+      return;
+    }
+    evt.preventDefault();
+    evt.stopPropagation();
+    var uploadId = btn.getAttribute('data-upload-id') || '';
+    var code = btn.getAttribute('data-material-code') || '';
+    if (!uploadId) {
+      return;
+    }
+    var origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '删除中…';
+    fetch('/api/v1/uploads/' + encodeURIComponent(uploadId) + '/delete/', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'X-CSRFToken': CSRF_TOKEN,
+        'X-Requested-With': 'XMLHttpRequest'
+      }
+    })
+      .then(function (resp) {
+        return resp.json().catch(function () { return {}; }).then(function (body) {
+          if (!resp.ok || body.error) {
+            throw new Error((body.error && body.error.message) || '删除失败');
+          }
+          removeSavedUploadsByIds(code, [uploadId]);
+          notifyUploadsChanged();
+          showDraftFeedback('已删除所选附件材料。', false);
+        });
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = origText || '删除';
+        window.alert((err && err.message) || '删除失败');
+      });
+  });
 
   function materialConfig(code) {
     for (var i = 0; i < MATERIALS.length; i += 1) {
@@ -836,6 +1103,10 @@
   }
 
   function validateStepThree() {
+    if (Object.keys(uploadJobs).length > 0) {
+      window.alert('仍有附件正在上传中，请等待上传完成后再继续。');
+      return false;
+    }
     var problems = [];
     MATERIALS.forEach(function (config) {
       var count = countOf(config.code);
@@ -867,7 +1138,7 @@
   }
 
   /* ------------------------------------------------------------------
-   * Step 4 回显与提交
+   * Step 4 回显、草稿保存与提交
    * ------------------------------------------------------------------ */
   function formatBytes(bytes) {
     if (!bytes) {
@@ -891,6 +1162,7 @@
 
   function renderSummary() {
     setSummary('project_name', fieldProjectName.value.trim());
+    setSummary('category', fieldCategory ? fieldCategory.value.trim() : '');
     setSummary('advisor_name', fieldAdvisor.value.trim());
     setSummary('practice_place', fieldPlace.value.trim());
     setSummary('date_range', fieldDateStart.value && fieldDateEnd.value ? fieldDateStart.value + ' 至 ' + fieldDateEnd.value : '');
@@ -907,7 +1179,8 @@
         } else {
           teamBox.innerHTML = '<span class="badge bg-blue-lt">团队申报</span> <div class="mt-2 d-flex flex-wrap gap-2">' +
             members.map(function (member) {
-              return '<span class="badge bg-secondary-lt">' + escapeHtml(member.student_number) + ' ' + escapeHtml(member.real_name) + '</span>';
+              var clsPart = member.class_name ? (' · ' + member.class_name) : '';
+              return '<span class="badge bg-secondary-lt">' + escapeHtml(member.student_number) + ' ' + escapeHtml(member.real_name) + escapeHtml(clsPart) + '</span>';
             }).join('') + '</div>';
         }
       }
@@ -917,15 +1190,30 @@
     if (box) {
       box.innerHTML = '';
       MATERIALS.forEach(function (config) {
-        var files = filesOf(config.code);
+        var savedFiles = (savedUploadsByCode[config.code] || []).map(function (up) {
+          return {
+            name: up.original_name || '未命名文件',
+            size: up.actual_bytes || 0,
+            native: null,
+            ext: up.ext || extOf(up.original_name),
+            previewUrl: up.preview_url || '',
+            isSaved: true
+          };
+        });
+        var files = savedFiles.concat(filesOf(config.code));
         var card = document.createElement('div');
         card.className = 'col-12 col-md-6 col-xl-4';
         var body = files.length
           ? files.map(function (file) {
-              var isImage = ['.jpg', '.jpeg', '.png'].indexOf(file.ext) !== -1 && file.native;
-              var thumb = isImage
-                ? '<img src="' + window.URL.createObjectURL(file.native) + '" alt="' + escapeHtml(file.name) + '" class="apply-thumb">'
-                : '<span class="avatar avatar-sm bg-secondary-lt">' + escapeHtml(file.ext.replace('.', '').toUpperCase() || '文件') + '</span>';
+              var isImgExt = ['.jpg', '.jpeg', '.png'].indexOf(file.ext) !== -1;
+              var thumb;
+              if (isImgExt && file.native) {
+                thumb = '<img src="' + window.URL.createObjectURL(file.native) + '" alt="' + escapeHtml(file.name) + '" class="apply-thumb">';
+              } else if (isImgExt && file.isSaved && file.previewUrl) {
+                thumb = '<img src="' + escapeHtml(file.previewUrl) + '" alt="' + escapeHtml(file.name) + '" class="apply-thumb">';
+              } else {
+                thumb = '<span class="avatar avatar-sm bg-secondary-lt">' + escapeHtml(file.ext.replace('.', '').toUpperCase() || '文件') + '</span>';
+              }
               return '<div class="d-flex align-items-center gap-2 mb-2">' + thumb +
                 '<div class="text-truncate"><div class="text-truncate">' + escapeHtml(file.name) + '</div>' +
                 '<div class="text-secondary small">' + formatBytes(file.size) + '</div></div></div>';
@@ -941,6 +1229,90 @@
         box.appendChild(card);
       });
     }
+  }
+
+  function showDraftFeedback(message, isError) {
+    var feedback = document.getElementById('draft-save-feedback');
+    if (!feedback) {
+      return;
+    }
+    feedback.textContent = message;
+    feedback.className = 'alert mt-3 mb-0 ' + (isError ? 'alert-danger' : 'alert-success');
+  }
+
+  function collectDraftPayload() {
+    var declType = isTeamMode() ? 'team' : 'individual';
+    return {
+      project_name: fieldProjectName ? String(fieldProjectName.value || '').trim() : '',
+      category: fieldCategory ? String(fieldCategory.value || '').trim() : '',
+      advisor_name: fieldAdvisor ? String(fieldAdvisor.value || '').trim() : '',
+      practice_place: fieldPlace ? String(fieldPlace.value || '').trim() : '',
+      date_start: fieldDateStart ? String(fieldDateStart.value || '').trim() : '',
+      date_end: fieldDateEnd ? String(fieldDateEnd.value || '').trim() : '',
+      project_intro: fieldIntro ? String(fieldIntro.value || '').trim() : '',
+      declaration_type: declType,
+      team_members: declType === 'team' ? collectMembers() : []
+    };
+  }
+
+  function saveDraft(silent) {
+    if (!CAN_SUBMIT || !DETAIL_URL) {
+      return Promise.reject(new Error('当前没有可保存的申报草稿。'));
+    }
+    var payload = collectDraftPayload();
+    if (!payload.project_name) {
+      flag(fieldProjectName, false);
+      if (!silent) {
+        showDraftFeedback('请至少填写项目名称后再保存草稿。', true);
+      }
+      return Promise.reject(new Error('请先填写项目名称。'));
+    }
+    if (payload.declaration_type === 'team' && payload.team_members.length > 0 && !validateStepTwo()) {
+      if (!silent) {
+        showDraftFeedback('团队成员的学号、姓名与班级均不能为空。', true);
+      }
+      return Promise.reject(new Error('团队成员信息不完整。'));
+    }
+
+    return fetch(DETAIL_URL, {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': CSRF_TOKEN,
+        'X-Requested-With': 'XMLHttpRequest'
+      },
+      body: JSON.stringify({
+        expected_version: currentVersion,
+        draft_data: payload
+      })
+    })
+      .then(function (resp) {
+        return resp.json().catch(function () { return {}; }).then(function (data) {
+          return { ok: resp.ok, status: resp.status, data: data };
+        });
+      })
+      .then(function (result) {
+        if (!result.ok || (result.data && result.data.error)) {
+          var message = (result.data && result.data.error && result.data.error.message) ||
+            ('草稿保存失败（HTTP ' + result.status + '）。');
+          throw new Error(message);
+        }
+        if (result.data && typeof result.data.version === 'number') {
+          currentVersion = result.data.version;
+          wizard.dataset.version = String(currentVersion);
+        }
+        if (!silent) {
+          showDraftFeedback('草稿已保存（当前版本 v' + currentVersion + '）。', false);
+        }
+        return result.data;
+      })
+      .catch(function (err) {
+        if (!silent) {
+          showDraftFeedback((err && err.message) || '草稿保存失败。', true);
+        }
+        throw err;
+      });
   }
 
   function showSubmitError(message) {
@@ -972,10 +1344,76 @@
     });
   }
 
+  var btnSaveDraft = document.getElementById('btn-save-draft');
+  if (btnSaveDraft) {
+    btnSaveDraft.addEventListener('click', function () {
+      btnSaveDraft.disabled = true;
+      btnSaveDraft.classList.add('btn-loading');
+      saveDraft(false)
+        .catch(function () { /* 错误信息已展示 */ })
+        .then(function () {
+          btnSaveDraft.disabled = false;
+          btnSaveDraft.classList.remove('btn-loading');
+        });
+    });
+  }
+
   var btnSubmit = document.getElementById('btn-confirm-submit');
 
   function submitApplication() {
-    if (!CAN_SUBMIT || !SUBMIT_URL) {
+    if (WIZARD_MODE === 'outcomes') {
+      if (!CAN_SUBMIT || !SUBMIT_URL) {
+        showSubmitError('当前没有可提交的成果记录（请确认活动是否开放，或刷新页面后重试）。');
+        return;
+      }
+      if (!DECLARATION_SUBMITTED) {
+        showSubmitError('请先在「我的申报」完成假期前项目信息、团队成员与 .docx 申报表提交，再提交成果审核。');
+        return;
+      }
+      if (!validateStepThree()) {
+        showSubmitError('成果材料尚未齐全或超出数量上限，请检查实践报告（.pdf）与现场照片（3–5 张）。');
+        return;
+      }
+      hideSubmitError();
+      btnSubmit.disabled = true;
+      btnSubmit.classList.add('btn-loading');
+
+      fetch(SUBMIT_URL, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': CSRF_TOKEN,
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify({ request_key: uuid4() })
+      })
+        .then(function (resp) {
+          return resp.json().catch(function () { return {}; }).then(function (data) {
+            return { ok: resp.ok, status: resp.status, data: data };
+          });
+        })
+        .then(function (result) {
+          if (result.ok) {
+            window.location.href = SUCCESS_URL || DETAIL_URL;
+            return;
+          }
+          var message = (result.data && result.data.error && result.data.error.message) ||
+            ('成果提交失败（HTTP ' + result.status + '），请稍后重试。');
+          showSubmitError(message);
+        })
+        .catch(function (err) {
+          showSubmitError('成果提交未完成：' + (err && err.message ? err.message : '未知错误'));
+        })
+        .then(function () {
+          btnSubmit.disabled = false;
+          btnSubmit.classList.remove('btn-loading');
+        });
+      return;
+    }
+
+    var targetDeclareUrl = DECLARE_URL || SUBMIT_URL;
+    if (!CAN_SUBMIT || !targetDeclareUrl) {
       showSubmitError('当前没有可提交的申报记录（请确认活动是否开放，或刷新页面后重试）。');
       return;
     }
@@ -983,20 +1421,27 @@
       showSubmitError('表单信息不完整，请返回对应步骤补全后再提交。');
       return;
     }
+    if (!validateStepThree()) {
+      showSubmitError('请先上传 1 份 .docx 格式的项目申报表后再提交申报。');
+      return;
+    }
     hideSubmitError();
     btnSubmit.disabled = true;
     btnSubmit.classList.add('btn-loading');
 
-    fetch(SUBMIT_URL, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRFToken': CSRF_TOKEN,
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      body: JSON.stringify({ request_key: uuid4() })
-    })
+    saveDraft(true)
+      .then(function () {
+        return fetch(targetDeclareUrl, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': CSRF_TOKEN,
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: JSON.stringify({ request_key: uuid4() })
+        });
+      })
       .then(function (resp) {
         return resp.json().catch(function () { return {}; }).then(function (data) {
           return { ok: resp.ok, status: resp.status, data: data };
@@ -1004,7 +1449,40 @@
       })
       .then(function (result) {
         if (result.ok) {
-          window.location.href = SUCCESS_URL || DETAIL_URL;
+          if (result.data && result.data.submission && typeof result.data.submission.version === 'number') {
+            currentVersion = result.data.submission.version;
+            wizard.dataset.version = String(currentVersion);
+          }
+          DECLARATION_SUBMITTED = true;
+          wizard.dataset.declarationSubmitted = 'true';
+          var banner = document.getElementById('declaration-submitted-banner');
+          if (banner) {
+            banner.classList.remove('d-none');
+            banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+          var badge = document.getElementById('apply-decl-status-badge');
+          if (badge) {
+            badge.textContent = '已完成立项申报';
+            badge.className = 'badge badge-final_approved ms-2';
+          }
+          var segSubmit = document.getElementById('apply-seg-submit');
+          if (segSubmit) {
+            segSubmit.textContent = '已申报';
+          }
+          btnSubmit.textContent = '更新并重新提交申报';
+          if (SUBMISSION_ID) {
+            var activeCard = document.querySelector('[data-submission-card="' + SUBMISSION_ID + '"]');
+            if (activeCard) {
+              var titleNode = activeCard.querySelector('.fw-semibold');
+              var newTitle = fieldProjectName ? String(fieldProjectName.value || '').trim() : '';
+              if (titleNode && newTitle) {
+                titleNode.textContent = newTitle;
+                titleNode.setAttribute('title', newTitle);
+              }
+            }
+          }
+          showDraftFeedback('项目申报已提交成功！可前往「成果收集」栏目上传并提交成果材料。', false);
+          document.dispatchEvent(new CustomEvent('apply:declaration-submitted'));
           return;
         }
         var message = (result.data && result.data.error && result.data.error.message) ||
@@ -1012,7 +1490,7 @@
         showSubmitError(message);
       })
       .catch(function (err) {
-        showSubmitError('网络异常，提交未完成：' + (err && err.message ? err.message : '未知错误'));
+        showSubmitError('提交未完成：' + (err && err.message ? err.message : '未知错误'));
       })
       .then(function () {
         btnSubmit.disabled = false;
@@ -1027,11 +1505,15 @@
   /* ------------------------------------------------------------------
    * 启动
    * ------------------------------------------------------------------ */
-  applyDeclarationMode();
+  if (WIZARD_MODE !== 'outcomes') {
+    applyDeclarationMode();
+    refreshDateSpan();
+  }
   initFilePonds();
-  refreshDateSpan();
 
-  // 支持 #step-3 这类深链直接落位（步骤条本身也可点击切换）
-  var deepLink = parseInt(String(window.location.hash || '').replace('#step-', ''), 10);
-  showStep(deepLink >= 1 && deepLink <= TOTAL_STEPS ? deepLink : 1, { skipValidation: true });
+  if (panels.length) {
+    // 支持 #step-3 这类深链直接落位（步骤条本身也可点击切换）
+    var deepLink = parseInt(String(window.location.hash || '').replace('#step-', ''), 10);
+    showStep(deepLink >= 1 && deepLink <= TOTAL_STEPS ? deepLink : 1, { skipValidation: true });
+  }
 })();

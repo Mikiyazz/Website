@@ -1,25 +1,33 @@
 from django.db.models import Max, Prefetch, Q
 from apps.accounts.models import StudentRoster, User
-from apps.accounts.permissions import is_college_admin
+from apps.accounts.permissions import (
+    is_college_admin,
+    is_reviewer,
+    reviewer_allowed_class_names,
+    reviewer_own_class_scope,
+    reviewer_user_scope_q,
+)
 from apps.activities.models import Activity
 from apps.common.errors import DomainError
 from apps.exports.services import resolve_status_filter
 from apps.submissions.models import Submission
+from apps.submissions.services import redundant_member_draft_ids
 from .models import ReviewAssignment, ReviewRecord
 
 
 def reviewable_submissions(user, activity_id):
     if is_college_admin(user):
-        return Submission.objects.filter(activity_id=activity_id)
-    if not user.is_authenticated or not user.is_active or user.role != User.Role.REVIEWER:
+        qs = Submission.objects.filter(activity_id=activity_id)
+    elif not is_reviewer(user):
         return Submission.objects.none()
-    assignments = list(
-        ReviewAssignment.objects.filter(reviewer=user, activity_id=activity_id).values_list("class_name", flat=True)
-    )
-    if not assignments or "" in assignments:
-        return Submission.objects.filter(activity_id=activity_id)
-    allowed_classes = [c.strip() for c in assignments if c and c.strip()]
-    return Submission.objects.filter(activity_id=activity_id, owner__class_name__in=allowed_classes)
+    else:
+        qs = Submission.objects.filter(activity_id=activity_id).filter(
+            reviewer_user_scope_q(user, prefix="owner__", activity_id=activity_id)
+        )
+    redundant_ids = redundant_member_draft_ids([activity_id])
+    if redundant_ids:
+        qs = qs.exclude(pk__in=redundant_ids)
+    return qs
 
 # =====================================================================
 # 审核工作台（/reviews/workbench/）：服务端 Q 过滤 + 全历史时间线
@@ -29,14 +37,16 @@ WORKBENCH_ROW_LIMIT = 200
 
 
 def workbench_activities(user):
-    """Activity dropdown scope: admin sees all; reviewer sees assigned activities (or all)."""
+    """Activity dropdown scope: admin or class-bound reviewer sees all; assignment-only reviewer sees assigned activities."""
     if is_college_admin(user):
         return Activity.objects.all().order_by("-created_at")
-    if not getattr(user, "is_authenticated", False) or not user.is_active or user.role != User.Role.REVIEWER:
+    if not is_reviewer(user):
         return Activity.objects.none()
-    assigned = ReviewAssignment.objects.filter(reviewer=user)
-    if not assigned.exists():
+    if reviewer_own_class_scope(user) is not None:
         return Activity.objects.all().order_by("-created_at")
+    assigned = ReviewAssignment.objects.filter(reviewer=user).exclude(class_name="")
+    if not assigned.exists():
+        return Activity.objects.none()
     return Activity.objects.filter(id__in=assigned.values("activity_id")).distinct().order_by("-created_at")
 
 
@@ -45,29 +55,38 @@ def workbench_permitted_submissions(user, activity_ids):
     if not activity_ids:
         return Submission.objects.none()
     qs = Submission.objects.filter(activity_id__in=activity_ids)
+    redundant_ids = redundant_member_draft_ids(activity_ids)
+    if redundant_ids:
+        qs = qs.exclude(pk__in=redundant_ids)
     if is_college_admin(user):
         return qs
-    if not getattr(user, "is_authenticated", False) or not user.is_active or user.role != User.Role.REVIEWER:
+    if not is_reviewer(user):
         return Submission.objects.none()
+    if reviewer_own_class_scope(user) is not None:
+        return qs.filter(reviewer_user_scope_q(user, prefix="owner__"))
     assignments = list(
         ReviewAssignment.objects.filter(reviewer=user, activity_id__in=activity_ids).values_list(
             "activity_id", "class_name"
         )
     )
-    if not assignments:
-        return qs
     clause = Q(pk__in=[])
+    has_valid = False
     for activity_id, class_name in assignments:
         clean = str(class_name or "").strip()
         if clean:
             clause |= Q(activity_id=activity_id, owner__class_name=clean)
-        else:
-            clause |= Q(activity_id=activity_id)
+            has_valid = True
+    if not has_valid:
+        return Submission.objects.none()
     return qs.filter(clause)
 
 
-def workbench_class_options():
-    """Class dropdown: deduplicated StudentRoster classes plus classes that already submitted."""
+def workbench_class_options(user=None):
+    """Class dropdown: admin sees all classes; reviewer sees only their own class scope."""
+    if user is not None and not is_college_admin(user):
+        if is_reviewer(user):
+            return reviewer_allowed_class_names(user)
+        return []
     roster_classes = set(
         StudentRoster.objects.exclude(class_name="").order_by("class_name").values_list("class_name", flat=True).distinct()
     )
@@ -77,10 +96,37 @@ def workbench_class_options():
     return sorted(roster_classes | submitted_classes)
 
 
+def normalize_declaration_type_filter(value: str | None) -> str:
+    """规范化申报形式筛选参数，支持 individual/team 及中文别名。"""
+    raw = str(value or "").strip().lower()
+    if raw in ("individual", "个人", "个人申报"):
+        return Submission.DeclarationType.INDIVIDUAL
+    if raw in ("team", "团队", "团队申报"):
+        return Submission.DeclarationType.TEAM
+    return ""
+
+
+def declaration_type_filter_q(declaration_type: str | None) -> Q | None:
+    """构造个人/团队筛选 Q 条件：team 精确匹配，individual 匹配非 team（含缺省个人草稿）。"""
+    normalized = normalize_declaration_type_filter(declaration_type)
+    if normalized == Submission.DeclarationType.TEAM:
+        return Q(draft_data__declaration_type=Submission.DeclarationType.TEAM)
+    if normalized == Submission.DeclarationType.INDIVIDUAL:
+        return (
+            Q(draft_data__declaration_type=Submission.DeclarationType.INDIVIDUAL)
+            | Q(draft_data__declaration_type__isnull=True)
+            | ~Q(draft_data__has_key="declaration_type")
+            | Q(draft_data__declaration_type="")
+        )
+    return None
+
+
 def build_workbench_filter_q(
     *,
     activity_id=None,
     class_name="",
+    category="",
+    declaration_type="",
     status="",
     late="",
     whitelist_numbers=None,
@@ -92,6 +138,12 @@ def build_workbench_filter_q(
     class_name = str(class_name or "").strip()
     if class_name:
         filter_q &= Q(owner__class_name=class_name)
+    category = str(category or "").strip()
+    if category:
+        filter_q &= Q(draft_data__category=category)
+    decl_q = declaration_type_filter_q(declaration_type)
+    if decl_q is not None:
+        filter_q &= decl_q
 
     status = str(status or "").strip()
     if status == Submission.LATE_SUBMITTED:
@@ -121,7 +173,17 @@ def build_workbench_filter_q(
     return filter_q
 
 
-def collect_workbench_rows(*, user, activity_id=None, class_name="", status="", late="", whitelist_numbers=None):
+def collect_workbench_rows(
+    *,
+    user,
+    activity_id=None,
+    class_name="",
+    category="",
+    declaration_type="",
+    status="",
+    late="",
+    whitelist_numbers=None,
+):
     """Return serialized workbench rows: student, activity, submitted_at, badge, full review history."""
     activities = list(workbench_activities(user))
     activity_ids = [act.id for act in activities]
@@ -130,6 +192,8 @@ def collect_workbench_rows(*, user, activity_id=None, class_name="", status="", 
     filter_q = build_workbench_filter_q(
         activity_id=activity_id,
         class_name=class_name,
+        category=category,
+        declaration_type=declaration_type,
         status=status,
         late=late,
         whitelist_numbers=whitelist_numbers,
@@ -172,6 +236,15 @@ def collect_workbench_rows(*, user, activity_id=None, class_name="", status="", 
                 "project_name": (submission.draft_data or {}).get("project_name", "")
                 if isinstance(submission.draft_data, dict)
                 else "",
+                "category": (submission.draft_data or {}).get("category", "")
+                if isinstance(submission.draft_data, dict)
+                else "",
+                "declaration_type": (
+                    Submission.DeclarationType.TEAM
+                    if isinstance(submission.draft_data, dict)
+                    and submission.draft_data.get("declaration_type") == Submission.DeclarationType.TEAM
+                    else Submission.DeclarationType.INDIVIDUAL
+                ),
                 "submitted_at": submission.submitted_at or submission.created_at,
                 "status_code": submission.status,
                 "badge_status": submission.badge_status,

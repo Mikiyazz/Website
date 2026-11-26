@@ -8,7 +8,7 @@ from apps.audit.services import record
 from apps.common.api import endpoint, json_body
 from apps.common.errors import DomainError, Forbidden
 from apps.uploads.services import ensure_standard_material_requirements
-from .models import Activity
+from .models import Activity, DEFAULT_PROJECT_CATEGORIES, parse_project_categories
 from .selectors import eligible_activities
 
 
@@ -31,6 +31,7 @@ def serialize_activity(act: Activity):
         "deadline": act.deadline.isoformat(),
         "is_open": act.is_open,
         "allowed_classes": list(act.allowed_classes or []),
+        "project_categories": act.get_project_categories(),
         "late_whitelist_student_numbers": list(act.late_whitelist_student_numbers or []),
     }
 
@@ -82,6 +83,14 @@ def manage_activity(request):
         act.opens_at = opens_at
         act.deadline = deadline
         act.is_open = is_open
+        if "project_categories" in data:
+            try:
+                parsed_categories = parse_project_categories(data.get("project_categories"))
+            except ValueError as exc:
+                raise DomainError(str(exc)) from None
+            act.project_categories = (
+                [] if parsed_categories == list(DEFAULT_PROJECT_CATEGORIES) else parsed_categories
+            )
         if "late_whitelist_student_numbers" in data and isinstance(data["late_whitelist_student_numbers"], list):
             act.late_whitelist_student_numbers = [
                 str(sn).strip() for sn in data["late_whitelist_student_numbers"] if str(sn).strip()
@@ -94,11 +103,21 @@ def manage_activity(request):
         whitelist = []
         if isinstance(data.get("late_whitelist_student_numbers"), list):
             whitelist = [str(sn).strip() for sn in data["late_whitelist_student_numbers"] if str(sn).strip()]
+        custom_categories = []
+        if "project_categories" in data:
+            try:
+                parsed_categories = parse_project_categories(data.get("project_categories"))
+            except ValueError as exc:
+                raise DomainError(str(exc)) from None
+            custom_categories = (
+                [] if parsed_categories == list(DEFAULT_PROJECT_CATEGORIES) else parsed_categories
+            )
         act = Activity.objects.create(
             title=title,
             opens_at=opens_at,
             deadline=deadline,
             is_open=is_open,
+            project_categories=custom_categories,
             late_whitelist_student_numbers=whitelist,
         )
         action_name = "activity.created"

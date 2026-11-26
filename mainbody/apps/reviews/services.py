@@ -10,8 +10,36 @@ from .models import ReviewRecord
 from .selectors import reviewable_submissions
 
 
+APPROVED_RETURN_STATUSES = frozenset({
+    Submission.Status.PENDING_FINAL_REVIEW,
+    Submission.Status.FINAL_APPROVED,
+})
+
+
+def has_first_review_permission(actor, activity_id, submission: Submission) -> bool:
+    """判断操作者是否对该申报拥有初审或终审权限。"""
+    if not getattr(actor, "is_authenticated", False) or not getattr(actor, "is_active", False):
+        return False
+    if is_college_admin(actor):
+        return True
+    return (
+        getattr(actor, "role", None) == User.Role.REVIEWER
+        and reviewable_submissions(actor, activity_id).filter(pk=submission.pk).exists()
+    )
+
+
 @transaction.atomic
-def review_submission(*, actor, activity_id, submission_id, decision, comment="", revision_id=None, request_key=None):
+def review_submission(
+    *,
+    actor,
+    activity_id,
+    submission_id,
+    decision,
+    comment="",
+    revision_id=None,
+    request_key=None,
+    confirm_approved_return: bool = False,
+):
     if not actor.is_authenticated or not actor.is_active:
         raise Forbidden("请先登录有效账号。")
 
@@ -33,20 +61,17 @@ def review_submission(*, actor, activity_id, submission_id, decision, comment=""
         raise Conflict("审核的目标版本已被更新，请刷新后重新审核。")
 
     current_status = submission.status
+    actor_is_admin = is_college_admin(actor)
+    actor_can_first = has_first_review_permission(actor, activity_id, submission)
 
     if current_status == Submission.Status.PENDING_FIRST_REVIEW:
         # 第一级：初审（团支书 / 审核人员，或学院管理员）
-        can_first_review = is_college_admin(actor) or (
-            actor.role == User.Role.REVIEWER
-            and reviewable_submissions(actor, activity_id).filter(pk=submission.pk).exists()
-        )
-        if not can_first_review:
+        if not actor_can_first:
             raise Forbidden("无权对此材料进行初审。")
 
         stage = ReviewRecord.Stage.FIRST
 
         if decision == ReviewRecord.Decision.RETURNED:
-            # 强制校验：打回时必须填写打回意见，原因不能为空
             if not comment:
                 raise DomainError("初审打回时必须填写打回意见，原因不能为空。")
             next_status = Submission.Status.RETURNED
@@ -55,20 +80,35 @@ def review_submission(*, actor, activity_id, submission_id, decision, comment=""
             next_status = Submission.Status.PENDING_FINAL_REVIEW
 
     elif current_status == Submission.Status.PENDING_FINAL_REVIEW:
-        # 第二级：终审（老师 / 学院管理员）
-        if not is_college_admin(actor):
-            raise Forbidden("仅学院管理员/老师拥有终审权限。")
-
-        stage = ReviewRecord.Stage.FINAL
-
-        if decision == ReviewRecord.Decision.RETURNED:
-            # 强制校验：打回时必须填写打回意见，原因不能为空
-            if not comment:
-                raise DomainError("终审打回时必须填写打回意见，原因不能为空。")
-            next_status = Submission.Status.RETURNED
-        else:
-            # 终审通过
+        if decision == ReviewRecord.Decision.APPROVED:
+            # 终审通过仅限学院管理员/终审老师
+            if not actor_is_admin:
+                raise Forbidden("仅学院管理员/老师拥有终审通过权限。")
+            stage = ReviewRecord.Stage.FINAL
             next_status = Submission.Status.FINAL_APPROVED
+        else:
+            # 已过初审的成果：拥有初审或终审权限的人员均可打回，但需填写意见并完成二次确认
+            if not actor_can_first:
+                raise Forbidden("无权打回此材料。")
+            if not comment:
+                raise DomainError("打回修改时必须填写打回意见，原因不能为空。")
+            if not confirm_approved_return:
+                raise DomainError("该材料已通过初审，打回修改前请先完成二次确认。")
+            stage = ReviewRecord.Stage.FINAL if actor_is_admin else ReviewRecord.Stage.FIRST
+            next_status = Submission.Status.RETURNED
+
+    elif current_status == Submission.Status.FINAL_APPROVED:
+        if decision == ReviewRecord.Decision.APPROVED:
+            raise Conflict("该材料已终审通过，无需重复通过。")
+        # 已终审通过的成果：拥有初审或终审权限的人员均可打回，但需填写意见并完成二次确认
+        if not actor_can_first:
+            raise Forbidden("无权打回此材料。")
+        if not comment:
+            raise DomainError("打回修改时必须填写打回意见，原因不能为空。")
+        if not confirm_approved_return:
+            raise DomainError("该成果已终审通过，打回修改前请先完成二次确认。")
+        stage = ReviewRecord.Stage.FINAL if actor_is_admin else ReviewRecord.Stage.FIRST
+        next_status = Submission.Status.RETURNED
 
     else:
         raise Conflict(f"当前材料状态为【{submission.get_status_display()}】，不在可审核流转阶段。")
@@ -97,8 +137,10 @@ def review_submission(*, actor, activity_id, submission_id, decision, comment=""
             "review_record_id": str(review_record.id),
             "stage": stage,
             "decision": decision,
+            "previous_status": current_status,
             "status": submission.status,
             "comment": comment,
+            "confirm_approved_return": bool(confirm_approved_return),
         },
     )
 

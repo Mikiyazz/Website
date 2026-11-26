@@ -18,8 +18,11 @@ urlpatterns = [
     path("accounts/password-change/", account_views.change_password_page_view, name="password-change-page"),
     path("accounts/change-password/", account_views.change_password_page_view, name="change-password-page"),
     path("student/workbench/", account_views.dashboard_view, name="student-workbench"),
-    # 学生端四步申报向导（页面入口；API 前缀下另有一份同名视图 /api/v1/submissions/apply/）
+    # 学生端独立两栏目：假期前立项申报（/submissions/apply/）与开学后成果收集（/submissions/outcomes/）
+    path("submissions/new/", submission_views.create_new_submission, name="submission-create-new"),
+    path("submissions/<uuid:submission_id>/delete/", submission_views.delete_submission_view, name="submission-delete-page"),
     path("submissions/apply/", submission_views.apply, name="submission-apply-page"),
+    path("submissions/outcomes/", submission_views.outcomes, name="submission-outcomes-page"),
     # 队员学号占位查询：前端调用 /api/students/lookup/?student_number=...
     path("api/students/lookup/", account_views.student_lookup_view, name="student-lookup"),
     path("student/submissions/save/", account_views.student_save_draft_view, name="student-save-draft"),

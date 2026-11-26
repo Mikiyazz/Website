@@ -3,59 +3,258 @@
 {% block title %}审核工作台 · 学院社会实践材料平台{% endblock %}
 
 {% block content %}
-<div class="page-header mb-3">
-  <div class="row align-items-center g-2">
-    <div class="col">
-      <div class="page-pretitle">学院社会实践 · 审核端</div>
-      <h2 class="page-title mb-1">审核工作台</h2>
-      <div class="text-secondary small">
-        {{ user.real_name|default:user.username }}（{{ user.username }}）·
-        {% if is_college_admin %}学院管理员{% else %}审核老师{% endif %}
-        {% if selected_activity %}· 当前活动：{{ selected_activity.title }}{% endif %}
+<!-- 顶部问候与大号 KPI 阵列 -->
+<section class="hero-editorial">
+  <div>
+    <div class="hero-greeting-eyebrow">学院社会实践 · 审核工作台</div>
+    <h1 class="hero-greeting-title">你好，{{ user.real_name|default:user.username }}</h1>
+    <p class="hero-greeting-sub">
+      {{ user.username }} · {% if is_college_admin %}学院管理员{% else %}班级团支书{% if reviewer_class_label %} · {{ reviewer_class_label }}{% endif %}{% endif %}
+      {% if selected_activity %} · 当前活动：<strong>{{ selected_activity.title }}</strong>{% endif %}
+    </p>
+  </div>
+  <div class="hero-kpi-strip">
+    <div class="hero-kpi-item">
+      <div class="hero-kpi-top">
+        <span class="hero-kpi-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-2"/><path d="M9 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z"/></svg>
+        </span>
+        <span class="kpi-value">{{ counts.total }}</span>
       </div>
+      <span class="hero-kpi-label">申报总数</span>
     </div>
-    <div class="col-auto ms-auto">
-      <button type="button"
-              class="btn btn-primary"
-              id="btn-start-export"
-              data-activity-id="{{ selected_activity.id|default:'' }}"
-              data-start-url="{% url 'export-start' %}"
-              {% if not can_export %}disabled title="请先选择一个活动"{% endif %}>
-        批量导出
-      </button>
+    <div class="hero-kpi-item">
+      <div class="hero-kpi-top">
+        <span class="hero-kpi-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"/><path d="M12 7v5l3 3"/></svg>
+        </span>
+        <span class="kpi-value" id="wb-kpi-pending">{{ counts.pending_first_review|add:counts.pending_final_review }}</span>
+      </div>
+      <span class="hero-kpi-label">待审核</span>
+    </div>
+    <div class="hero-kpi-item">
+      <div class="hero-kpi-top">
+        <span class="hero-kpi-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10"/></svg>
+        </span>
+        <span class="kpi-value">{{ counts.final_approved }}</span>
+      </div>
+      <span class="hero-kpi-label">终审通过</span>
+    </div>
+  </div>
+</section>
+
+<!-- 标志性横向多段胶囊进度条（点击可直达对应状态筛选） -->
+<div class="segmented-progress-panel" id="wb-segmented-bar"
+     data-c-first="{{ counts.pending_first_review }}"
+     data-c-final="{{ counts.pending_final_review }}"
+     data-c-approved="{{ counts.final_approved }}"
+     data-c-returned="{{ counts.returned }}"
+     data-c-total="{{ counts.total }}">
+  <div class="segmented-progress-grid">
+    <div class="segmented-col" data-seg-col="first" style="flex-grow: 25;">
+      <span class="segmented-col-label">待初审</span>
+      <a class="segmented-bar-seg seg-charcoal {% if status_filter == 'pending_first_review' %}is-active{% endif %}"
+         data-seg-status="pending_first_review"
+         href="{% url 'review-workbench' %}?activity_id={{ activity_id }}&status=pending_first_review{% if class_filter %}&class_name={{ class_filter|urlencode }}{% endif %}{% if category_filter %}&category={{ category_filter|urlencode }}{% endif %}{% if declaration_type_filter %}&declaration_type={{ declaration_type_filter|urlencode }}{% endif %}#workbench-queue-card">
+        <span data-seg-text="first">{{ counts.pending_first_review }} 条</span>
+      </a>
+    </div>
+    <div class="segmented-col" data-seg-col="final" style="flex-grow: 25;">
+      <span class="segmented-col-label">待终审</span>
+      <a class="segmented-bar-seg seg-amber {% if status_filter == 'pending_final_review' %}is-active{% endif %}"
+         data-seg-status="pending_final_review"
+         href="{% url 'review-workbench' %}?activity_id={{ activity_id }}&status=pending_final_review{% if class_filter %}&class_name={{ class_filter|urlencode }}{% endif %}{% if category_filter %}&category={{ category_filter|urlencode }}{% endif %}{% if declaration_type_filter %}&declaration_type={{ declaration_type_filter|urlencode }}{% endif %}#workbench-queue-card">
+        <span data-seg-text="final">{{ counts.pending_final_review }} 条</span>
+      </a>
+    </div>
+    <div class="segmented-col" data-seg-col="approved" style="flex-grow: 30;">
+      <span class="segmented-col-label">终审通过</span>
+      <a class="segmented-bar-seg seg-striped {% if status_filter == 'final_approved' %}is-active{% endif %}"
+         data-seg-status="final_approved"
+         href="{% url 'review-workbench' %}?activity_id={{ activity_id }}&status=final_approved{% if class_filter %}&class_name={{ class_filter|urlencode }}{% endif %}{% if category_filter %}&category={{ category_filter|urlencode }}{% endif %}{% if declaration_type_filter %}&declaration_type={{ declaration_type_filter|urlencode }}{% endif %}#workbench-queue-card">
+        <span data-seg-text="approved">{{ counts.final_approved }} 条</span>
+      </a>
+    </div>
+    <div class="segmented-col" data-seg-col="returned" style="flex-grow: 20;">
+      <span class="segmented-col-label">打回修改</span>
+      <a class="segmented-bar-seg seg-outline {% if status_filter == 'returned' %}is-active{% endif %}"
+         data-seg-status="returned"
+         href="{% url 'review-workbench' %}?activity_id={{ activity_id }}&status=returned{% if class_filter %}&class_name={{ class_filter|urlencode }}{% endif %}{% if category_filter %}&category={{ category_filter|urlencode }}{% endif %}{% if declaration_type_filter %}&declaration_type={{ declaration_type_filter|urlencode }}{% endif %}#workbench-queue-card">
+        <span data-seg-text="returned">{{ counts.returned }} 条</span>
+      </a>
     </div>
   </div>
 </div>
 
-<!-- 异步导出进度：POST 后每 2 秒轮询 /api/v1/exports/status/<job_id>/ -->
-<div class="card card-pad mb-4" id="export-progress-card" {% if not export_jobs %}hidden{% endif %}>
-  <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
-    <div>
-      <h3 class="card-title mb-1" id="export-progress-title">导出任务</h3>
-      <div class="text-secondary small" id="export-progress-meta">等待开始…</div>
-    </div>
-    <span class="badge bg-secondary-lt text-secondary" id="export-progress-badge" data-export-status="pending">等待</span>
-  </div>
-  <div class="progress progress-sm my-3" role="progressbar" aria-label="导出进度"
-       aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="export-progress-wrapper">
-    <div class="progress-bar bg-primary" id="export-progress-bar" style="width: 0%"></div>
-  </div>
-  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span class="small text-secondary" id="export-progress-percent">0%</span>
-    <div id="export-download-wrap" hidden>
-      <a class="btn btn-sm btn-success" id="export-download-link" href="#">下载 ZIP 归档包</a>
-    </div>
-  </div>
-</div>
-
-<div class="row row-cards mb-1">
-  <div class="col-12">
-    <div class="card card-pad" id="export-jobs-card">
-      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
-        <h3 class="card-title mb-0">正在进行的导出任务</h3>
-        <span class="text-secondary small">关闭页面不会中断导出；刷新工作台可继续查看进度。</span>
+<!-- 上半部 Bento 概览区：左侧柔白分布+补交手风琴 / 右侧哑光炭黑异步导出卡 -->
+<div class="row g-4 mb-4 align-items-stretch">
+  <div class="col-12 col-lg-7 d-flex flex-column gap-4">
+    <!-- 状态与班级分布轻量柱状条卡片 -->
+    <div class="card card-pad">
+      <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+        <div>
+          <h3 class="card-title mb-1">{% if is_college_admin %}审核状态与班级分布{% else %}审核状态分布{% endif %}</h3>
+          <div class="small text-secondary">高亮暖琥珀黄柱为当前队列最高峰项，点击下方列表可展开审核时间线。</div>
+        </div>
+        <a class="card-corner-btn" href="#workbench-queue-card" title="定位到审核队列">↗</a>
       </div>
-      <div class="table-responsive">
+      <div class="bento-bar-chart" id="wb-distribution-chart" aria-label="审核分布柱状图">
+        <div class="bento-bar-col" data-bar-count="{{ counts.pending_first_review }}">
+          <span class="bento-bar-count">{{ counts.pending_first_review }}</span>
+          <div class="bento-bar-track"><div class="bento-bar-fill" style="height: 22%;"></div></div>
+          <span class="bento-bar-name">待初审</span>
+        </div>
+        <div class="bento-bar-col" data-bar-count="{{ counts.pending_final_review }}">
+          <span class="bento-bar-count">{{ counts.pending_final_review }}</span>
+          <div class="bento-bar-track"><div class="bento-bar-fill" style="height: 22%;"></div></div>
+          <span class="bento-bar-name">待终审</span>
+        </div>
+        <div class="bento-bar-col" data-bar-count="{{ counts.final_approved }}">
+          <span class="bento-bar-count">{{ counts.final_approved }}</span>
+          <div class="bento-bar-track"><div class="bento-bar-fill" style="height: 22%;"></div></div>
+          <span class="bento-bar-name">终审通过</span>
+        </div>
+        <div class="bento-bar-col" data-bar-count="{{ counts.returned }}">
+          <span class="bento-bar-count">{{ counts.returned }}</span>
+          <div class="bento-bar-track"><div class="bento-bar-fill" style="height: 22%;"></div></div>
+          <span class="bento-bar-name">打回修改</span>
+        </div>
+        <div class="bento-bar-col" data-bar-count="{{ counts.late }}">
+          <span class="bento-bar-count">{{ counts.late }}</span>
+          <div class="bento-bar-track"><div class="bento-bar-fill" style="height: 22%;"></div></div>
+          <span class="bento-bar-name">白名单迟交</span>
+        </div>
+      </div>
+    </div>
+
+    {% if is_college_admin and selected_activity %}
+    <!-- 补交设置手风琴卡片：开关 + 补交截止 + 批量粘贴学号 -->
+    <div class="card card-pad" id="late-settings-card">
+      <div class="accordion bento-accordion" id="late-settings-accordion">
+        <div class="accordion-item">
+          <h3 class="accordion-header">
+            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#late-settings-collapse" aria-expanded="true" aria-controls="late-settings-collapse">
+              <span>补交设置 · 白名单 {{ selected_activity.late_whitelist_student_numbers|length }} 人</span>
+            </button>
+          </h3>
+          <div id="late-settings-collapse" class="accordion-collapse collapse show" data-bs-parent="#late-settings-accordion">
+            <div class="accordion-body">
+              <p class="text-secondary small mb-3">
+                活动截止后，白名单内的学号仍可创建/修改草稿、上传材料并提交审核；导出归档时会自动在文件名前加
+                <code>late_</code> 前缀，方便老师区分。
+              </p>
+              <form method="post" action="{% url 'admin-activity-late-settings' selected_activity.id %}" id="late-settings-form">
+                {% csrf_token %}
+                <div class="row g-3 align-items-end">
+                  <div class="col-12 col-md-4">
+                    <label class="form-check form-switch mb-0" for="late_submission_enabled">
+                      <input class="form-check-input" type="checkbox" role="switch"
+                             id="late_submission_enabled" name="late_submission_enabled"
+                             {% if selected_activity.late_submission_enabled %}checked{% endif %}>
+                      <span class="form-check-label">启用补交白名单</span>
+                    </label>
+                  </div>
+                  <div class="col-12 col-md-5">
+                    <label class="form-label" for="late_submission_deadline">补交截止时间</label>
+                    <input type="datetime-local" class="form-control" id="late_submission_deadline"
+                           name="late_submission_deadline"
+                           value="{{ selected_activity.late_submission_deadline|date:'Y-m-d\TH:i' }}">
+                    <div class="form-hint">留空表示活动截止后长期开放给白名单学生。</div>
+                  </div>
+                  <div class="col-12 col-md-3">
+                    <span class="small text-secondary">当前白名单：<strong class="tabular-nums">{{ selected_activity.late_whitelist_student_numbers|length }}</strong> 人</span>
+                  </div>
+                </div>
+
+                <div class="mt-3">
+                  <label class="form-label" for="late_whitelist_text">白名单学号（每行一个，也支持逗号/空格/分号批量粘贴，自动去重）</label>
+                  <textarea class="form-control font-monospace" id="late_whitelist_text" name="late_whitelist_text" rows="5"
+                            placeholder="2025080901&#10;2025080902&#10;2025080903">{{ whitelist_text }}</textarea>
+                </div>
+
+                <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
+                  <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-parse-whitelist"
+                          data-parse-url="{% url 'admin-activity-whitelist-parse' selected_activity.id %}">
+                    解析并校验学号
+                  </button>
+                  <span class="small text-secondary" id="whitelist-parse-summary">
+                    {% if whitelist_invalid %}上次保存有 {{ whitelist_invalid|length }} 个学号未通过存在性校验。{% endif %}
+                  </span>
+                </div>
+
+                <div class="mt-2 d-flex flex-wrap gap-1" id="whitelist-invalid-box">
+                  {% for sn in whitelist_invalid %}
+                  <span class="badge badge-invalid-student" data-invalid-student="{{ sn }}">{{ sn }} · 不存在</span>
+                  {% endfor %}
+                </div>
+
+                <div class="mt-3">
+                  <button type="submit" class="btn btn-primary">保存补交设置</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- 右侧哑光炭黑高对比异步导出焦点卡 -->
+  <div class="col-12 col-lg-5">
+    <aside class="charcoal-anchor-card h-100 d-flex flex-column" id="export-jobs-card">
+      <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+        <div>
+          <div class="small charcoal-muted">异步归档中心</div>
+          <h3 class="card-title mb-1 mt-1">正在进行的导出任务</h3>
+          <span class="charcoal-muted small">关闭页面不会中断导出；刷新工作台可继续查看进度。</span>
+        </div>
+        <div class="d-flex align-items-center gap-2 flex-shrink-0">
+          <a class="card-corner-btn" href="{% url 'dashboard' %}" title="前往仪表盘">↗</a>
+        </div>
+      </div>
+
+      <div class="d-flex align-items-center gap-2 flex-wrap mb-3">
+        <select class="form-select form-select-sm flex-grow-1"
+                id="export-mode-select"
+                aria-label="导出模式"
+                {% if not can_export %}disabled{% endif %}>
+          <option value="declaration_only">导出申报表</option>
+          <option value="declaration_and_outcomes" selected>导出申报表和成果</option>
+        </select>
+        <button type="button"
+                class="btn btn-amber btn-sm flex-shrink-0"
+                id="btn-start-export"
+                data-activity-id="{{ selected_activity.id|default:'' }}"
+                data-start-url="{% url 'export-start' %}"
+                {% if not can_export %}disabled title="请先选择一个活动"{% endif %}>
+          批量导出
+        </button>
+      </div>
+
+      <!-- 异步导出实时进度面板（POST 后每 2 秒轮询） -->
+      <div class="mb-3 p-3 rounded-4" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.09);" id="export-progress-card" {% if not export_jobs %}hidden{% endif %}>
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+          <div>
+            <h4 class="h4 mb-1" id="export-progress-title">导出任务</h4>
+            <div class="charcoal-muted small" id="export-progress-meta">等待开始…</div>
+          </div>
+          <span class="badge bg-secondary-lt text-secondary" id="export-progress-badge" data-export-status="pending">等待</span>
+        </div>
+        <div class="progress progress-sm my-3" role="progressbar" aria-label="导出进度"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="export-progress-wrapper">
+          <div class="progress-bar" id="export-progress-bar" style="width: 0%"></div>
+        </div>
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span class="small charcoal-muted tabular-nums" id="export-progress-percent">0%</span>
+          <div id="export-download-wrap" hidden>
+            <a class="btn btn-sm btn-amber" id="export-download-link" href="#">下载 ZIP 归档包</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-responsive flex-grow-1">
         <table class="table table-vcenter table-sm mb-0" id="export-jobs-table">
           <thead>
             <tr>
@@ -69,23 +268,26 @@
           <tbody>
             {% for job in export_jobs %}
             <tr data-export-job="{{ job.id }}">
-              <td>{{ job.activity.title }}</td>
+              <td class="small">
+                <div>{{ job.activity.title }}</div>
+                <div class="charcoal-muted" style="font-size: 11px;">{{ job.export_mode_label }}</div>
+              </td>
               <td>
-                <span class="badge {% if job.status == 'done' %}bg-success-lt text-success{% elif job.status == 'failed' %}bg-danger-lt text-danger{% elif job.status == 'running' %}bg-blue-lt text-blue{% else %}bg-secondary-lt text-secondary{% endif %}"
+                <span class="badge {% if job.status == 'done' %}badge-final_approved{% elif job.status == 'failed' %}badge-returned{% elif job.status == 'running' %}badge-pending_first_review{% else %}badge-draft{% endif %}"
                       data-job-status="{{ job.status }}">{{ job.get_status_display }}</span>
               </td>
               <td>
-                <div class="d-flex align-items-center gap-2" style="min-width: 160px;">
+                <div class="d-flex align-items-center gap-2" style="min-width: 110px;">
                   <div class="progress progress-sm flex-grow-1">
                     <div class="progress-bar" style="width: {{ job.percent }}%"></div>
                   </div>
-                  <span class="small text-secondary">{{ job.percent }}%</span>
+                  <span class="small charcoal-muted tabular-nums">{{ job.percent }}%</span>
                 </div>
               </td>
-              <td class="text-secondary small">{{ job.created_at|date:"m-d H:i" }}</td>
+              <td class="charcoal-muted small tabular-nums">{{ job.created_at|date:"m-d H:i" }}</td>
               <td>
                 {% if job.status == 'done' %}
-                <a class="btn btn-sm btn-outline-success" href="{% url 'export-download' job.id %}">下载 ZIP</a>
+                <a class="btn btn-sm btn-amber" href="{% url 'export-download' job.id %}">下载 ZIP</a>
                 {% elif job.status == 'failed' %}
                 <span class="text-danger small">失败：{{ job.error_code|default:"未知" }}</span>
                 {% else %}
@@ -95,28 +297,30 @@
             </tr>
             {% empty %}
             <tr>
-              <td colspan="5" class="text-center text-secondary py-3" id="export-jobs-empty">当前没有导出任务。选择活动后点击右上角“批量导出”。</td>
+              <td colspan="5" class="text-center charcoal-muted py-4 small" id="export-jobs-empty">当前没有导出任务。选择活动后点击右上角“批量导出”。</td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
-    </div>
+    </aside>
   </div>
 </div>
 
-<!-- 筛选栏：全部服务端过滤（filter_q），不做前端假筛选 -->
-<div class="card mt-3">
-  <div class="card-header">
-    <h3 class="card-title">申报材料审核列表</h3>
-    <div class="card-actions">
-      <span class="badge bg-blue-lt text-blue">共 {{ counts.total }} 条</span>
-      {% if counts.late %}<span class="badge bg-purple-lt text-purple ms-1">迟交 {{ counts.late }}</span>{% endif %}
+<!-- 下半部审核队列区：大圆角柔白容器包裹多维筛选条与宽行距表格 -->
+<div class="card overflow-hidden" id="workbench-queue-card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+      <h3 class="card-title mb-0">申报材料审核列表</h3>
+    </div>
+    <div class="card-actions d-flex align-items-center gap-2" id="workbench-count-badges">
+      <span class="badge badge-pending_first_review">共 {{ counts.total }} 条</span>
+      {% if counts.late %}<span class="badge badge-late_submitted">迟交 {{ counts.late }}</span>{% endif %}
     </div>
   </div>
-  <div class="card-body border-bottom py-3 filter-bar" id="workbench-filter-bar">
-    <form method="get" action="{% url 'review-workbench' %}" class="row g-2 align-items-end">
-      <div class="col-12 col-md-3">
+  <div class="card-body py-3 filter-bar" id="workbench-filter-bar">
+    <form method="get" action="{% url 'review-workbench' %}" id="workbench-filter-form" class="row g-2 align-items-end">
+      <div class="col-12 col-md-4 col-xl-2">
         <label class="form-label" for="filter_activity_id">活动</label>
         <select class="form-select" name="activity_id" id="filter_activity_id">
           {% for act in activities %}
@@ -126,7 +330,8 @@
           {% endfor %}
         </select>
       </div>
-      <div class="col-12 col-md-3">
+      {% if is_college_admin or class_options|length > 1 %}
+      <div class="col-12 col-sm-6 col-md-4 col-xl-2">
         <label class="form-label" for="filter_class_name">班级</label>
         <select class="form-select" name="class_name" id="filter_class_name">
           <option value="">全部班级</option>
@@ -135,7 +340,25 @@
           {% endfor %}
         </select>
       </div>
-      <div class="col-12 col-md-2">
+      {% endif %}
+      <div class="col-12 col-sm-6 col-md-4 col-xl-2">
+        <label class="form-label" for="filter_category">活动类别</label>
+        <select class="form-select" name="category" id="filter_category">
+          <option value="">全部类别</option>
+          {% for cat in category_options %}
+          <option value="{{ cat }}" {% if category_filter == cat %}selected{% endif %}>{{ cat }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-sm-6 col-md-4 col-xl-2">
+        <label class="form-label" for="filter_declaration_type">申报形式</label>
+        <select class="form-select" name="declaration_type" id="filter_declaration_type">
+          <option value="">全部形式</option>
+          <option value="individual" {% if declaration_type_filter == 'individual' %}selected{% endif %}>个人申报</option>
+          <option value="team" {% if declaration_type_filter == 'team' %}selected{% endif %}>团队申报</option>
+        </select>
+      </div>
+      <div class="col-12 col-sm-6 col-md-4 col-xl-2">
         <label class="form-label" for="filter_status">状态</label>
         <select class="form-select" name="status" id="filter_status">
           <option value="">全部状态</option>
@@ -144,7 +367,7 @@
           {% endfor %}
         </select>
       </div>
-      <div class="col-12 col-md-2">
+      <div class="col-12 col-sm-6 col-md-4 col-xl-2">
         <label class="form-label" for="filter_late">迟交白名单</label>
         <select class="form-select" name="late" id="filter_late">
           <option value="">全部</option>
@@ -152,9 +375,9 @@
           <option value="0" {% if late_filter == '0' %}selected{% endif %}>非白名单学生</option>
         </select>
       </div>
-      <div class="col-12 col-md-auto d-flex gap-2">
+      <div class="col-12 d-flex justify-content-end gap-2">
         <button type="submit" class="btn btn-primary">筛选</button>
-        <a class="btn btn-outline-secondary" href="{% url 'review-workbench' %}?activity_id={{ activity_id }}">重置</a>
+        <a class="btn btn-outline-secondary" id="btn-workbench-reset" href="{% url 'review-workbench' %}?activity_id={{ activity_id }}">重置</a>
       </div>
     </form>
   </div>
@@ -163,51 +386,62 @@
     <table class="table table-vcenter card-table" id="workbench-table">
       <thead>
         <tr>
-          <th style="width: 110px;">学号</th>
+          <th style="width: 115px;">学号</th>
           <th style="width: 100px;">姓名</th>
           <th style="width: 140px;">班级</th>
           <th>活动名</th>
-          <th style="width: 140px;">提交时间</th>
-          <th style="width: 150px;">状态</th>
-          <th style="width: 140px;">审核历史</th>
+          <th style="width: 145px;">提交时间</th>
+          <th style="width: 140px;">状态</th>
+          <th style="width: 160px;">审核历史</th>
         </tr>
       </thead>
       <tbody>
         {% for row in rows %}
         <tr data-submission-row="{{ row.id }}" data-status="{{ row.badge_status }}">
-          <td class="text-secondary">{{ row.student_number }}</td>
+          <td class="text-secondary tabular-nums">{{ row.student_number }}</td>
           <td><strong>{{ row.real_name|default:row.student_number }}</strong></td>
           <td>{{ row.class_name|default:"-" }}</td>
-          <td>
-            <div>{{ row.activity_title }}</div>
-            {% if row.project_name %}<div class="text-secondary small">{{ row.project_name }}</div>{% endif %}
+          <td class="wb-activity-cell">
+            <button type="button"
+                    class="wb-activity-toggle"
+                    aria-expanded="false"
+                    title="点击展开或收起活动名">
+              <span class="wb-activity-main">
+                <span class="wb-activity-title">{{ row.activity_title }}</span>
+                <span class="wb-activity-caret" aria-hidden="true">▾</span>
+              </span>
+              {% if row.project_name %}<span class="wb-activity-project text-secondary small">{{ row.project_name }}</span>{% endif %}
+            </button>
           </td>
-          <td class="text-secondary small">{{ row.submitted_at|date:"Y-m-d H:i" }}</td>
+          <td class="text-secondary small tabular-nums">{{ row.submitted_at|date:"Y-m-d H:i" }}</td>
           <td>
             <span class="badge badge-status badge-status-{{ row.badge_tone }}"
                   data-status="{{ row.badge_status }}">{{ row.badge_label }}</span>
           </td>
           <td>
-            <button type="button"
-                    class="btn btn-sm btn-outline-secondary text-nowrap"
-                    data-bs-toggle="collapse"
-                    data-bs-target="#history-{{ row.id }}"
-                    aria-expanded="false"
-                    aria-controls="history-{{ row.id }}">
-              {% if row.history %}审核历史（{{ row.history|length }}）{% else %}暂无历史{% endif %}
-            </button>
-            <a class="btn btn-sm btn-link px-1" href="{{ row.detail_url }}">详情</a>
+            <div class="d-flex align-items-center gap-1 flex-wrap">
+              <button type="button"
+                      class="btn btn-sm btn-outline-secondary text-nowrap"
+                      data-bs-toggle="collapse"
+                      data-bs-target="#history-{{ row.id }}"
+                      aria-expanded="false"
+                      aria-controls="history-{{ row.id }}">
+                {% if row.history %}审核历史（{{ row.history|length }}）{% else %}暂无历史{% endif %}
+              </button>
+              <a class="btn btn-sm btn-link px-1 text-decoration-none" href="{{ row.detail_url }}">详情 ↗</a>
+            </div>
           </td>
         </tr>
         <tr class="collapse" id="history-{{ row.id }}">
           <td colspan="7" class="p-0 border-0">
-            <div class="accordion accordion-flush" id="accordion-{{ row.id }}">
-              <div class="accordion-item">
-                <div class="accordion-body">
-                  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
-                    <strong>审核时间线 · {{ row.real_name|default:row.student_number }} · {{ row.activity_title }}</strong>
-                    <span class="badge badge-status badge-status-{{ row.badge_tone }}">{{ row.badge_label }}</span>
-                  </div>
+            <div class="workbench-history-box">
+              <div class="accordion accordion-flush" id="accordion-{{ row.id }}">
+                <div class="accordion-item bg-transparent border-0">
+                  <div class="accordion-body p-0">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                      <strong>审核时间线 · {{ row.real_name|default:row.student_number }} · {{ row.activity_title }}</strong>
+                      <span class="badge badge-status badge-status-{{ row.badge_tone }}">{{ row.badge_label }}</span>
+                    </div>
                     <ul class="timeline mb-0">
                       {% for item in row.history %}
                       <li class="timeline-event">
@@ -216,10 +450,10 @@
                           <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
                             <div>
                               <strong>{{ item.reviewer }}</strong>
-                              <span class="badge bg-secondary-lt text-secondary ms-1">{{ item.reviewer_stage }}</span>
-                              <span class="badge {% if item.decision_code == 'approved' %}bg-success-lt text-success{% else %}bg-danger-lt text-danger{% endif %} ms-1">{{ item.decision }}</span>
+                              <span class="badge badge-draft ms-1">{{ item.reviewer_stage }}</span>
+                              <span class="badge {% if item.decision_code == 'approved' %}badge-final_approved{% else %}badge-returned{% endif %} ms-1">{{ item.decision }}</span>
                             </div>
-                            <span class="text-secondary small">{{ item.created_at|date:"Y-m-d H:i:s" }}</span>
+                            <span class="text-secondary small tabular-nums">{{ item.created_at|date:"Y-m-d H:i:s" }}</span>
                           </div>
                           {% if item.comment %}
                           <div class="mt-2 small">{{ item.comment|linebreaksbr }}</div>
@@ -237,6 +471,7 @@
                       </li>
                       {% endfor %}
                     </ul>
+                  </div>
                 </div>
               </div>
             </div>
@@ -244,73 +479,13 @@
         </tr>
         {% empty %}
         <tr>
-          <td colspan="7" class="text-center text-secondary py-4">当前筛选条件下暂无申报记录。</td>
+          <td colspan="7" class="text-center text-secondary py-5">当前筛选条件下暂无申报记录。</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 </div>
-
-{% if is_college_admin and selected_activity %}
-<!-- 补交设置卡片：开关 + 补交截止 + 批量粘贴学号（StudentRoster 存在性校验） -->
-<div class="card card-pad mt-3" id="late-settings-card">
-  <h3 class="card-title mb-1">补交设置</h3>
-  <p class="text-secondary small">
-    活动截止后，白名单内的学号仍可创建/修改草稿、上传材料并提交审核；导出归档时会自动在文件名前加
-    <code>late_</code> 前缀，方便老师区分。
-  </p>
-  <form method="post" action="{% url 'admin-activity-late-settings' selected_activity.id %}" id="late-settings-form">
-    {% csrf_token %}
-    <div class="row g-3 align-items-end">
-      <div class="col-12 col-md-4">
-        <label class="form-check form-switch mb-0" for="late_submission_enabled">
-          <input class="form-check-input" type="checkbox" role="switch"
-                 id="late_submission_enabled" name="late_submission_enabled"
-                 {% if selected_activity.late_submission_enabled %}checked{% endif %}>
-          <span class="form-check-label">启用补交白名单</span>
-        </label>
-      </div>
-      <div class="col-12 col-md-5">
-        <label class="form-label" for="late_submission_deadline">补交截止时间</label>
-        <input type="datetime-local" class="form-control" id="late_submission_deadline"
-               name="late_submission_deadline"
-               value="{{ selected_activity.late_submission_deadline|date:'Y-m-d\TH:i' }}">
-        <div class="form-hint">留空表示活动截止后长期开放给白名单学生。</div>
-      </div>
-      <div class="col-12 col-md-3">
-        <span class="small text-secondary">当前白名单：<strong>{{ selected_activity.late_whitelist_student_numbers|length }}</strong> 人</span>
-      </div>
-    </div>
-
-    <div class="mt-3">
-      <label class="form-label" for="late_whitelist_text">白名单学号（每行一个，也支持逗号/空格/分号批量粘贴，自动去重）</label>
-      <textarea class="form-control font-monospace" id="late_whitelist_text" name="late_whitelist_text" rows="8"
-                placeholder="2025080901&#10;2025080902&#10;2025080903">{{ whitelist_text }}</textarea>
-    </div>
-
-    <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
-      <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-parse-whitelist"
-              data-parse-url="{% url 'admin-activity-whitelist-parse' selected_activity.id %}">
-        解析并校验学号
-      </button>
-      <span class="small text-secondary" id="whitelist-parse-summary">
-        {% if whitelist_invalid %}上次保存有 {{ whitelist_invalid|length }} 个学号未通过存在性校验。{% endif %}
-      </span>
-    </div>
-
-    <div class="mt-2 d-flex flex-wrap gap-1" id="whitelist-invalid-box">
-      {% for sn in whitelist_invalid %}
-      <span class="badge badge-invalid-student" data-invalid-student="{{ sn }}">{{ sn }} · 不存在</span>
-      {% endfor %}
-    </div>
-
-    <div class="mt-3">
-      <button type="submit" class="btn btn-primary">保存补交设置</button>
-    </div>
-  </form>
-</div>
-{% endif %}
 {% endblock %}
 
 {% block extra_js %}
@@ -321,12 +496,265 @@
   var EXPORT_POLL_INTERVAL_MS = 2000;
   var csrfToken = (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] || "";
   var pollTimer = null;
-  var currentJobId = null;
 
   function byId(id) { return document.getElementById(id); }
 
+  var wbTable = byId("workbench-table");
+  if (wbTable) {
+    wbTable.addEventListener("click", function (evt) {
+      var toggle = evt.target && evt.target.closest ? evt.target.closest(".wb-activity-toggle") : null;
+      if (!toggle) { return; }
+      var expanded = toggle.classList.toggle("is-expanded");
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    });
+  }
+
+  // 筛选条件变化后无刷新局部更新下方审核表格
+  var filterForm = byId("workbench-filter-form");
+  var resetLink = byId("btn-workbench-reset");
+  var filterAbort = null;
+
+  function buildFormUrl(form) {
+    var base = form.getAttribute("action") || window.location.pathname;
+    var params = new URLSearchParams();
+    var fields = form.querySelectorAll("select[name], input[name]");
+    Array.prototype.forEach.call(fields, function (el) {
+      var name = el.getAttribute("name");
+      var val = el.value != null ? String(el.value).trim() : "";
+      if (name && val !== "") {
+        params.set(name, val);
+      }
+    });
+    var qs = params.toString();
+    return qs ? (base + "?" + qs) : base;
+  }
+
+  function refreshWorkbenchTable(targetUrl, activityChanged) {
+    var table = byId("workbench-table");
+    var tbody = table ? table.querySelector("tbody") : null;
+    if (!tbody) {
+      window.location.href = targetUrl;
+      return;
+    }
+    if (filterAbort && typeof filterAbort.abort === "function") {
+      filterAbort.abort();
+    }
+    filterAbort = typeof window.AbortController === "function" ? new window.AbortController() : null;
+    tbody.style.transition = "opacity 0.15s ease";
+    tbody.style.opacity = "0.55";
+
+    fetch(targetUrl, {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+      signal: filterAbort ? filterAbort.signal : undefined
+    }).then(function (resp) {
+      if (!resp.ok || (resp.redirected && resp.url && resp.url.indexOf("/accounts/login/") !== -1)) {
+        throw new Error("HTTP " + resp.status);
+      }
+      return resp.text();
+    }).then(function (html) {
+      var doc = new window.DOMParser().parseFromString(html, "text/html");
+      var nextTbody = doc.querySelector("#workbench-table tbody");
+      if (!nextTbody) {
+        throw new Error("missing tbody");
+      }
+      tbody.innerHTML = nextTbody.innerHTML;
+      var curBadges = byId("workbench-count-badges");
+      var nextBadges = doc.getElementById("workbench-count-badges");
+      if (curBadges && nextBadges) {
+        curBadges.innerHTML = nextBadges.innerHTML;
+      }
+      if (activityChanged) {
+        var curCat = byId("filter_category");
+        var nextCat = doc.getElementById("filter_category");
+        if (curCat && nextCat) {
+          curCat.innerHTML = nextCat.innerHTML;
+        }
+        var curReset = byId("btn-workbench-reset");
+        var nextReset = doc.getElementById("btn-workbench-reset");
+        if (curReset && nextReset) {
+          curReset.setAttribute("href", nextReset.getAttribute("href") || "");
+        }
+        var curExportBtn = byId("btn-start-export");
+        var nextExportBtn = doc.getElementById("btn-start-export");
+        var curModeSel = byId("export-mode-select");
+        if (curExportBtn && nextExportBtn) {
+          var nextActId = nextExportBtn.getAttribute("data-activity-id") || "";
+          curExportBtn.setAttribute("data-activity-id", nextActId);
+          curExportBtn.disabled = !nextActId;
+          if (curModeSel) { curModeSel.disabled = !nextActId; }
+        }
+      }
+      if (window.history && typeof window.history.replaceState === "function") {
+        window.history.replaceState(null, "", targetUrl);
+      }
+      tbody.style.opacity = "";
+    })["catch"](function (err) {
+      if (err && err.name === "AbortError") { return; }
+      tbody.style.opacity = "";
+      window.location.href = targetUrl;
+    });
+  }
+
+  if (filterForm) {
+    filterForm.addEventListener("change", function (evt) {
+      var target = evt.target;
+      if (!target || target.tagName !== "SELECT") { return; }
+      var isActivity = target.id === "filter_activity_id";
+      if (isActivity) {
+        var catEl = byId("filter_category");
+        if (catEl) { catEl.value = ""; }
+      }
+      refreshWorkbenchTable(buildFormUrl(filterForm), isActivity);
+    });
+    filterForm.addEventListener("submit", function (evt) {
+      evt.preventDefault();
+      refreshWorkbenchTable(buildFormUrl(filterForm), false);
+    });
+  }
+
+  if (resetLink && filterForm) {
+    resetLink.addEventListener("click", function (evt) {
+      evt.preventDefault();
+      Array.prototype.forEach.call(filterForm.querySelectorAll("select[name]"), function (el) {
+        if (el.id !== "filter_activity_id") {
+          el.value = "";
+        }
+      });
+      var segBarEl = byId("wb-segmented-bar");
+      if (segBarEl) {
+        Array.prototype.forEach.call(segBarEl.querySelectorAll("a.segmented-bar-seg"), function (a) {
+          a.classList.remove("is-active");
+        });
+      }
+      refreshWorkbenchTable(buildFormUrl(filterForm), false);
+    });
+  }
+
+  var wbSegBar = byId("wb-segmented-bar");
+  if (wbSegBar && filterForm) {
+    wbSegBar.addEventListener("click", function (evt) {
+      var link = evt.target && evt.target.closest ? evt.target.closest("a.segmented-bar-seg") : null;
+      if (!link) { return; }
+      evt.preventDefault();
+      var st = link.getAttribute("data-seg-status") || "";
+      var statusEl = byId("filter_status");
+      if (statusEl) { statusEl.value = st; }
+      Array.prototype.forEach.call(wbSegBar.querySelectorAll("a.segmented-bar-seg"), function (a) {
+        a.classList.toggle("is-active", a === link);
+      });
+      refreshWorkbenchTable(buildFormUrl(filterForm), false);
+      var card = byId("workbench-queue-card");
+      if (card && typeof card.scrollIntoView === "function") {
+        card.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  }
+
+  // 1. 多段胶囊进度条比例 + 轻量分布柱状图（最高峰暖琥珀黄高亮）
+  (function initBentoVisuals() {
+    var segBar = byId("wb-segmented-bar");
+    if (segBar) {
+      var counts = {
+        first: parseInt(segBar.getAttribute("data-c-first") || "0", 10) || 0,
+        final: parseInt(segBar.getAttribute("data-c-final") || "0", 10) || 0,
+        approved: parseInt(segBar.getAttribute("data-c-approved") || "0", 10) || 0,
+        returned: parseInt(segBar.getAttribute("data-c-returned") || "0", 10) || 0
+      };
+      var sum = counts.first + counts.final + counts.approved + counts.returned;
+      ["first", "final", "approved", "returned"].forEach(function (k) {
+        var col = segBar.querySelector('[data-seg-col="' + k + '"]');
+        var txt = segBar.querySelector('[data-seg-text="' + k + '"]');
+        var pct = sum > 0 ? Math.round((counts[k] / sum) * 100) : 0;
+        if (col) {
+          col.style.flexGrow = String(sum > 0 ? Math.max(14, pct) : 25);
+        }
+        if (txt) {
+          txt.textContent = sum > 0 ? (pct + "% (" + counts[k] + ")") : "0%";
+        }
+      });
+    }
+
+    var chart = byId("wb-distribution-chart");
+    if (chart) {
+      var cols = Array.prototype.slice.call(chart.querySelectorAll(".bento-bar-col"));
+      var maxVal = 0;
+      cols.forEach(function (c) {
+        var v = parseInt(c.getAttribute("data-bar-count") || "0", 10) || 0;
+        if (v > maxVal) { maxVal = v; }
+      });
+      var peakMarked = false;
+      cols.forEach(function (c) {
+        var v = parseInt(c.getAttribute("data-bar-count") || "0", 10) || 0;
+        var fill = c.querySelector(".bento-bar-fill");
+        var pct = maxVal > 0 ? Math.max(16, Math.round((v / maxVal) * 100)) : 18;
+        if (fill) { fill.style.height = pct + "%"; }
+        if (maxVal > 0 && v === maxVal && !peakMarked) {
+          c.classList.add("is-peak");
+          peakMarked = true;
+        }
+      });
+    }
+  })();
+
+  function escapeHtml(text) {
+    return String(text == null ? "" : text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function formatShortTime(isoStr) {
+    if (!isoStr) { return "刚刚"; }
+    var d = new Date(isoStr);
+    if (isNaN(d.getTime())) { return "刚刚"; }
+    var mm = String(d.getMonth() + 1).padStart(2, "0");
+    var dd = String(d.getDate()).padStart(2, "0");
+    var hh = String(d.getHours()).padStart(2, "0");
+    var mi = String(d.getMinutes()).padStart(2, "0");
+    return mm + "-" + dd + " " + hh + ":" + mi;
+  }
+
+  function upsertJobRow(job) {
+    var table = byId("export-jobs-table");
+    var tbody = table ? table.querySelector("tbody") : null;
+    if (!tbody || !job || !job.job_id) { return; }
+    var emptyCell = byId("export-jobs-empty");
+    if (emptyCell && emptyCell.parentNode) {
+      emptyCell.parentNode.remove();
+    }
+    var row = tbody.querySelector('tr[data-export-job="' + job.job_id + '"]');
+    if (!row) {
+      row = document.createElement("tr");
+      row.setAttribute("data-export-job", job.job_id);
+      tbody.insertBefore(row, tbody.firstChild);
+    }
+    var badgeCls =
+      job.status === "done" ? "badge-final_approved" :
+      job.status === "failed" ? "badge-returned" :
+      job.status === "running" ? "badge-pending_first_review" : "badge-draft";
+    var pct = Number(job.percent || 0);
+    var actionHtml = "";
+    if (job.status === "done" && job.download_url) {
+      actionHtml = '<a class="btn btn-sm btn-amber" href="' + escapeHtml(job.download_url) + '">下载 ZIP</a>';
+    } else if (job.status === "failed") {
+      actionHtml = '<span class="text-danger small">失败：' + escapeHtml(job.error_code || "未知") + "</span>";
+    } else {
+      actionHtml = '<button type="button" class="btn btn-sm btn-outline-secondary js-resume-export" data-job-id="' + escapeHtml(job.job_id) + '">查看进度</button>';
+    }
+    row.innerHTML =
+      '<td class="small"><div>' + escapeHtml(job.activity_title || "") + '</div><div class="charcoal-muted" style="font-size: 11px;">' + escapeHtml(job.mode_label || "") + "</div></td>" +
+      '<td><span class="badge ' + badgeCls + '" data-job-status="' + escapeHtml(job.status) + '">' + escapeHtml(job.status_display || job.status) + "</span></td>" +
+      '<td><div class="d-flex align-items-center gap-2" style="min-width: 110px;"><div class="progress progress-sm flex-grow-1"><div class="progress-bar" style="width: ' + pct + '%"></div></div><span class="small charcoal-muted tabular-nums">' + pct + "%</span></div></td>" +
+      '<td class="charcoal-muted small tabular-nums">' + escapeHtml(formatShortTime(job.created_at)) + "</td>" +
+      "<td>" + actionHtml + "</td>";
+  }
+
   function setProgress(job) {
     var card = byId("export-progress-card");
+    var titleEl = byId("export-progress-title");
     var bar = byId("export-progress-bar");
     var wrapper = byId("export-progress-wrapper");
     var percent = byId("export-progress-percent");
@@ -341,18 +769,24 @@
     bar.style.width = value + "%";
     if (wrapper) { wrapper.setAttribute("aria-valuenow", String(value)); }
     if (percent) { percent.textContent = value + "%"; }
+    if (titleEl) {
+      titleEl.textContent = job.mode_label ? ("导出任务 · " + job.mode_label) : "导出任务";
+    }
     if (badge) {
       badge.textContent = job.status_display || job.status;
       badge.setAttribute("data-export-status", job.status);
       badge.className = "badge " + (
-        job.status === "done" ? "bg-success-lt text-success" :
-        job.status === "failed" ? "bg-danger-lt text-danger" :
-        job.status === "running" ? "bg-blue-lt text-blue" : "bg-secondary-lt text-secondary"
+        job.status === "done" ? "badge-final_approved" :
+        job.status === "failed" ? "badge-returned" :
+        job.status === "running" ? "badge-pending_first_review" : "badge-draft"
       );
     }
     if (meta) {
-      var files = job.file_count ? (" · 文件 " + job.file_count + " 份") : "";
-      meta.textContent = (job.activity_title || "导出任务") + files +
+      var modeSeg = job.mode_label ? (" · " + job.mode_label) : "";
+      var files = job.file_count
+        ? (" · 文件 " + job.file_count + " 份")
+        : (job.status === "done" ? " · 暂无可导出文件（0 份）" : "");
+      meta.textContent = (job.activity_title || "导出任务") + modeSeg + files +
         (job.status === "failed" ? (" · 失败：" + (job.error_code || "未知")) : "");
     }
     if (downloadWrap && link) {
@@ -363,6 +797,7 @@
         downloadWrap.hidden = true;
       }
     }
+    upsertJobRow(job);
   }
 
   function stopPolling() {
@@ -389,7 +824,6 @@
   }
 
   function startPolling(jobId) {
-    currentJobId = jobId;
     stopPolling();
     pollOnce(jobId);
     pollTimer = setInterval(function () { pollOnce(jobId); }, EXPORT_POLL_INTERVAL_MS);
@@ -400,7 +834,10 @@
     exportBtn.addEventListener("click", function () {
       var activityId = exportBtn.getAttribute("data-activity-id");
       if (!activityId) { return; }
+      var modeSelect = byId("export-mode-select");
+      var exportMode = modeSelect ? modeSelect.value : "declaration_and_outcomes";
       exportBtn.disabled = true;
+      if (modeSelect) { modeSelect.disabled = true; }
       var card = byId("export-progress-card");
       if (card) { card.hidden = false; }
       var meta = byId("export-progress-meta");
@@ -414,11 +851,12 @@
           "X-CSRFToken": csrfToken,
           "Accept": "application/json"
         },
-        body: JSON.stringify({ activity_id: activityId })
+        body: JSON.stringify({ activity_id: activityId, mode: exportMode })
       }).then(function (resp) {
         return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
       }).then(function (result) {
         exportBtn.disabled = false;
+        if (modeSelect) { modeSelect.disabled = false; }
         if (!result.ok) {
           var message = (result.data && result.data.error && result.data.error.message) || "导出任务创建失败。";
           if (meta) { meta.textContent = message; }
@@ -429,21 +867,24 @@
         startPolling(result.data.job_id || job.job_id);
       })["catch"](function () {
         exportBtn.disabled = false;
+        if (modeSelect) { modeSelect.disabled = false; }
         if (meta) { meta.textContent = "网络异常，导出任务未能创建，请重试。"; }
       });
     });
   }
 
-  Array.prototype.forEach.call(document.querySelectorAll(".js-resume-export"), function (btn) {
-    btn.addEventListener("click", function () {
+  var exportJobsTable = byId("export-jobs-table");
+  if (exportJobsTable) {
+    exportJobsTable.addEventListener("click", function (evt) {
+      var btn = evt.target && evt.target.closest ? evt.target.closest(".js-resume-export") : null;
+      if (!btn) { return; }
       var jobId = btn.getAttribute("data-job-id");
       if (jobId) { startPolling(jobId); }
       var card = byId("export-progress-card");
       if (card) { card.hidden = false; }
     });
-  });
+  }
 
-  // 页面加载时若存在进行中的任务，自动接管第一个任务继续轮询。
   var runningRow = document.querySelector('[data-job-status="running"], [data-job-status="pending"]');
   if (runningRow) {
     var row = runningRow.closest("tr");
@@ -453,7 +894,6 @@
     }
   }
 
-  // 白名单批量解析：多行/逗号/空格一键解析去重，并在 StudentRoster 中逐个校验。
   var parseBtn = byId("btn-parse-whitelist");
   if (parseBtn) {
     parseBtn.addEventListener("click", function () {

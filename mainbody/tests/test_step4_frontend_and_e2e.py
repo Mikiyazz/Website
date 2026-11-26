@@ -44,7 +44,7 @@ def assert_inline_scripts_parsable(html: str) -> None:
 # =====================================================================
 
 def test_login_register_and_first_password_change_flow(client, db):
-    """验证登录页、自主注册页（含大一至研究生）、默认后6位密码提示、must_change_password 顶部提示与改密闭环。"""
+    """验证登录页、自主注册页规范校验（8位学号/202X级/6项固定专业/0X班/11位手机号/密码规则）与改密闭环。"""
     # 1) 登录页渲染
     login_resp = client.get("/accounts/login/")
     assert login_resp.status_code == 200
@@ -52,44 +52,84 @@ def test_login_register_and_first_password_change_flow(client, db):
     assert "学号后 6 位" in login_html
     assert "/accounts/register/" in login_html
 
-    # 2) 注册页渲染（检查学号、姓名、大一至大四及研究生、专业、班级、手机号、密码及规则说明）
+    # 2) 注册页渲染（检查 6 项固定专业下拉、输入框即时错误槽与内联 JS 合法性）
     reg_get = client.get("/accounts/register/")
     assert reg_get.status_code == 200
     reg_html = reg_get.content.decode("utf-8")
-    for grade_label in ("大一", "大二", "大三", "大四", "研究生"):
-        assert f'value="{grade_label}"' in reg_html
+    for major_label in (
+        "计算机类",
+        "人工智能",
+        "计算机科学与技术",
+        "软件工程",
+        "信息安全",
+        "数据科学与大数据技术",
+    ):
+        assert f'value="{major_label}"' in reg_html
+    for err_id in (
+        "err_student_number",
+        "err_real_name",
+        "err_grade",
+        "err_major",
+        "err_class_name",
+        "err_phone",
+        "err_password",
+    ):
+        assert f'id="{err_id}"' in reg_html
     assert "学号后 6 位" in reg_html
+    assert_inline_scripts_parsable(reg_html)
 
-    # 3) 提交学生自主注册表单（密码留空 -> 自动使用学号后6位，must_change_password=True）
+    # 2.5) 提交不合规数据时返回 400 并在对应字段下回显错误
+    bad_reg = client.post(
+        "/accounts/register/",
+        {
+            "student_number": "2025080988",  # 非8位
+            "real_name": "周同学",
+            "grade": "大二",                  # 非202X级
+            "major": "自定义专业",             # 不在6项内
+            "class_name": "1班",              # 个位数未补0
+            "phone": "13800138",              # 非11位
+            "password": "123",                # 自定义少于6位
+        },
+    )
+    assert bad_reg.status_code == 400
+    bad_html = bad_reg.content.decode("utf-8")
+    assert "学号必须为 8 位数字" in bad_html
+    assert "202X级" in bad_html
+    assert "不支持自定义专业" in bad_html
+    assert "01班" in bad_html
+    assert "手机号必须为 11 位数字" in bad_html
+    assert "至少为 6 位" in bad_html
+
+    # 3) 提交规范的学生自主注册表单（密码留空 -> 自动使用学号后6位，must_change_password=True）
     reg_post = client.post(
         "/accounts/register/",
         {
-            "student_number": "2025080988",
+            "student_number": "08250988",
             "real_name": "周同学",
-            "grade": "大二",
+            "grade": "2025级",
             "major": "信息安全",
-            "class_name": "信安25-1班",
+            "class_name": "01班",
             "phone": "13800138088",
             "password": "",
         },
     )
     assert reg_post.status_code == 302
-    user = User.objects.get(username="2025080988")
+    user = User.objects.get(username="08250988")
     assert user.real_name == "周同学"
-    assert user.grade == "大二"
+    assert user.grade == "2025级"
     assert user.major == "信息安全"
-    assert user.class_name == "信安25-1班"
+    assert user.class_name == "01班"
     assert user.phone == "13800138088"
     assert user.role == User.Role.STUDENT
     assert user.must_change_password is True
-    assert user.check_password("080988") is True
+    assert user.check_password("250988") is True
 
-    # 4) 登录后访问工作台，顶部显著展示 must_change_password=True 首次改密提醒横幅
+    # 4) 登录后访问工作台，顶部不再展示首次改密提醒横幅，但仍保留改密入口
     dash_resp = client.get("/")
     assert dash_resp.status_code == 200
     dash_html = dash_resp.content.decode("utf-8")
-    assert 'id="must-change-password-banner"' in dash_html
-    assert 'data-must-change-password="true"' in dash_html
+    assert 'id="must-change-password-banner"' not in dash_html
+    assert 'data-must-change-password="true"' not in dash_html
     assert "/accounts/password-change/" in dash_html
 
     # 5) 访问修改密码页面并完成首次改密
@@ -99,7 +139,7 @@ def test_login_register_and_first_password_change_flow(client, db):
     pwd_post = client.post(
         "/accounts/password-change/",
         {
-            "old_password": "080988",
+            "old_password": "250988",
             "new_password": "UpdatedPass#2026",
             "confirm_password": "UpdatedPass#2026",
         },
@@ -119,7 +159,7 @@ def test_login_register_and_first_password_change_flow(client, db):
 # =====================================================================
 
 def test_student_workbench_drag_upload_returned_banner_and_readonly_lock(client, activity, db):
-    """验证学生工作台个人/团队切换、拖拽上传与 upload.onprogress 进度条、打回红色提示框、原草稿修改与只读锁定。"""
+    """验证首页仪表盘无文件上传与表单、申报统一在我的申报向导内完成，并核对打回修改提示框与只读锁定全链路。"""
     student = User.objects.create_user(
         username="20250601",
         password="password123",
@@ -134,6 +174,9 @@ def test_student_workbench_drag_upload_returned_banner_and_readonly_lock(client,
         password="password123",
         real_name="李团支书",
         role=User.Role.REVIEWER,
+        class_name=student.class_name,
+        grade=student.grade,
+        major=student.major,
         must_change_password=False,
     )
     teacher = User.objects.create_user(
@@ -150,26 +193,36 @@ def test_student_workbench_drag_upload_returned_banner_and_readonly_lock(client,
     assert resp.status_code == 200
     html = resp.content.decode("utf-8")
 
-    # 验证工作台包含活动标题、草稿状态徽章、个人/团队切换、拖拽上传组件与原生 XHR upload.onprogress 实时进度条
+    # 首页仪表盘仅展示状态概览与跳转入口，不包含任何文件上传控件或申报表单
     assert activity.title in html
     assert "草稿" in html
-    assert 'id="radio_decl_individual"' in html
-    assert 'id="radio_decl_team"' in html
-    assert "addTeamMemberRow" in html
-    assert "removeTeamMemberRow" in html
-    assert "XMLHttpRequest" in html
-    assert "xhr.upload.onprogress" in html
-    assert "validateFileBeforeUpload" in html
-    assert 'id="dropzone-application_form"' in html
-    assert 'id="dropzone-practice_report"' in html
-    assert 'id="dropzone-scene_photos"' in html
-    assert 'id="dropzone-video"' in html
-    assert 'id="dropzone-other_materials"' in html
-
-    # 内联脚本必须整体可解析：否则 triggerFileInput/handleFileSelect 等函数不会注册，
-    # 点击「选择文件上传」和拖拽都会被浏览器静默忽略。
+    assert "/submissions/apply/" in html
+    assert 'id="student-submission-overview"' in html
+    assert 'type="file"' not in html
+    assert 'id="upload-workbench-section"' not in html
+    assert 'id="student-declaration-form"' not in html
+    assert 'id="dropzone-application_form"' not in html
     assert_inline_scripts_parsable(html)
-    assert 'onclick="triggerFileInput(' in html
+
+    # 申报填写与申报表上传在「我的申报」（/submissions/apply/），成果附件在「成果收集」（/submissions/outcomes/）
+    apply_resp = client.get(f"/submissions/apply/?activity_id={activity.id}")
+    assert apply_resp.status_code == 200
+    apply_html = apply_resp.content.decode("utf-8")
+    assert 'id="radio_decl_individual"' in apply_html
+    assert 'id="radio_decl_team"' in apply_html
+    assert 'id="team-member-template"' in apply_html
+    assert 'id="pond-application_form"' in apply_html
+    for outcome_code in ("practice_report", "scene_photos", "video", "other_materials"):
+        assert f'id="pond-{outcome_code}"' not in apply_html
+    assert_inline_scripts_parsable(apply_html)
+
+    outcomes_resp = client.get(f"/submissions/outcomes/?activity_id={activity.id}")
+    assert outcomes_resp.status_code == 200
+    outcomes_html = outcomes_resp.content.decode("utf-8")
+    for outcome_code in ("practice_report", "scene_photos", "video", "other_materials"):
+        assert f'id="pond-{outcome_code}"' in outcomes_html
+    assert 'id="pond-application_form"' not in outcomes_html
+    assert_inline_scripts_parsable(outcomes_html)
 
     # 学生通过工作台表单保存团队申报草稿
     sub = Submission.objects.get(owner=student, activity=activity)
@@ -206,12 +259,12 @@ def test_student_workbench_drag_upload_returned_banner_and_readonly_lock(client,
     sub.refresh_from_db()
     assert sub.status == Submission.Status.PENDING_FIRST_REVIEW
 
-    # 待初审状态下，学生工作台表单与上传区只读锁定
-    locked_html = client.get(f"/?activity_id={activity.id}").content.decode("utf-8")
-    assert 'id="readonly-lock-banner"' in locked_html
-    assert 'data-readonly-locked="true"' in locked_html
-    assert 'data-form-locked="true"' in locked_html
-    assert 'data-upload-locked="true"' in locked_html
+    # 活动开放期内，待初审状态下学生仍可查看状态并在我的申报中修改覆盖
+    submitted_html = client.get(f"/?activity_id={activity.id}").content.decode("utf-8")
+    assert "已提交" in submitted_html
+    submitted_apply_html = client.get(f"/submissions/apply/?activity_id={activity.id}").content.decode("utf-8")
+    assert 'data-upload-locked="false"' in submitted_apply_html
+    assert 'data-can-submit="true"' in submitted_apply_html
 
     # =====================================================================
     # 3. 团支书初审与指导老师终审工作台、在线预览/下载、打回修改双重校验
@@ -255,13 +308,18 @@ def test_student_workbench_drag_upload_returned_banner_and_readonly_lock(client,
     sub.refresh_from_db()
     assert sub.status == Submission.Status.RETURNED
 
-    # 学生重新登录查看工作台：顶部出现醒目红色打回提示框展示打回意见原文，且允许在原草稿直接修改
+    # 学生重新登录查看首页与我的申报：均出现醒目红色打回提示框展示打回意见原文，且允许在原草稿直接修改
     client.force_login(student)
     returned_html = client.get(f"/?activity_id={activity.id}").content.decode("utf-8")
     assert 'id="returned-alert-banner"' in returned_html
     assert 'class="alert-returned"' in returned_html
     assert reject_reason in returned_html
     assert 'data-readonly-locked="true"' not in returned_html
+    returned_apply_html = client.get(f"/submissions/apply/?activity_id={activity.id}").content.decode("utf-8")
+    assert 'id="returned-alert-banner"' in returned_apply_html
+    assert reject_reason in returned_apply_html
+    assert 'data-readonly-locked="true"' not in returned_apply_html
+    assert 'data-upload-locked="false"' in returned_apply_html
 
     # 学生在原草稿上直接修改项目名称并再次提交审核
     resave_resp = client.post(
@@ -312,11 +370,14 @@ def test_student_workbench_drag_upload_returned_banner_and_readonly_lock(client,
     sub.refresh_from_db()
     assert sub.status == Submission.Status.FINAL_APPROVED
 
-    # 学生端查看已终审通过的申报：处于只读锁定且状态为“终审通过”
+    # 学生端查看已终审通过的申报：状态显示为“终审通过”，活动截止后自动只读锁定
     client.force_login(student)
     final_student_html = client.get(f"/?activity_id={activity.id}").content.decode("utf-8")
     assert "终审通过" in final_student_html
-    assert 'data-readonly-locked="true"' in final_student_html
+    activity.deadline = timezone.now() - timedelta(hours=1)
+    activity.save(update_fields=["deadline", "updated_at"])
+    closed_student_html = client.get(f"/?activity_id={activity.id}").content.decode("utf-8")
+    assert 'data-readonly-locked="true"' in closed_student_html
 
 
 # =====================================================================

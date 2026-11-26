@@ -11,7 +11,7 @@ from .services import create_activity_export_job, run_activity_export_job
     soft_time_limit=3600,
     time_limit=3660,
 )
-def export_activity_submissions(activity_id, requested_by, job_id=None):
+def export_activity_submissions(activity_id, requested_by, job_id=None, mode=None):
     """Build one activity archive.
 
     Signature mirrors the requested contract export_activity_submissions(activity_id, requested_by);
@@ -21,7 +21,7 @@ def export_activity_submissions(activity_id, requested_by, job_id=None):
         from apps.accounts.models import User
 
         actor = User.objects.get(pk=requested_by)
-        job = create_activity_export_job(actor=actor, activity_id=activity_id)
+        job = create_activity_export_job(actor=actor, activity_id=activity_id, mode=mode)
         job_id = job.pk
     job = run_activity_export_job(job_id)
     return {

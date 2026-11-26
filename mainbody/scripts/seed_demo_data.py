@@ -47,7 +47,9 @@ def seed():
         defaults={
             "real_name": "李团支书",
             "role": User.Role.REVIEWER,
-            "class_name": "信安25-1班",
+            "grade": "2025级",
+            "major": "信息安全",
+            "class_name": "01班",
             "is_staff": False,
             "is_superuser": False,
             "must_change_password": False,
@@ -60,50 +62,50 @@ def seed():
 
     # 3. Students
     s1, _ = User.objects.get_or_create(
-        username="2025080901",
+        username="08250901",
         defaults={
             "real_name": "王同学",
             "role": User.Role.STUDENT,
-            "grade": "大二",
+            "grade": "2025级",
             "major": "信息安全",
-            "class_name": "信安25-1班",
+            "class_name": "01班",
             "phone": "13800000001",
             "must_change_password": True,
         }
     )
-    s1.set_password("080901")
+    s1.set_password("250901")
     s1.save()
 
     s2, _ = User.objects.get_or_create(
-        username="2025080902",
+        username="08250902",
         defaults={
             "real_name": "刘同学",
             "role": User.Role.STUDENT,
-            "grade": "大二",
+            "grade": "2025级",
             "major": "信息安全",
-            "class_name": "信安25-1班",
+            "class_name": "01班",
             "phone": "13800000002",
             "must_change_password": False,
         }
     )
-    s2.set_password("080902")
+    s2.set_password("250902")
     s2.save()
 
     s3, _ = User.objects.get_or_create(
-        username="2025080903",
+        username="08250903",
         defaults={
             "real_name": "陈同学",
             "role": User.Role.STUDENT,
-            "grade": "大二",
+            "grade": "2025级",
             "major": "信息安全",
-            "class_name": "信安25-2班",
+            "class_name": "02班",
             "phone": "13800000003",
             "must_change_password": True,
         }
     )
-    s3.set_password("080903")
+    s3.set_password("250903")
     s3.save()
-    print("  [+] Student accounts (password = 学号后6位): 2025080901, 2025080902, 2025080903")
+    print("  [+] Student accounts (password = 学号后6位): 08250901, 08250902, 08250903")
 
     # 4. Activity
     now = timezone.now()
@@ -114,7 +116,7 @@ def seed():
             "deadline": now + timedelta(days=14),
             "is_open": True,
             "allowed_classes": [],
-            "late_whitelist_student_numbers": ["2025080903"],
+            "late_whitelist_student_numbers": ["08250903"],
         }
     )
     activity.is_open = True
@@ -165,7 +167,7 @@ def seed():
                 "category": "红色传承",
                 "declaration_type": "team",
                 "team_members": [
-                    {"student_number": "2025080903", "real_name": "陈同学", "class_name": "信安25-2班"}
+                    {"student_number": "08250903", "real_name": "陈同学", "class_name": "02班"}
                 ],
             }
         }
@@ -176,7 +178,7 @@ def seed():
         "category": "红色传承",
         "declaration_type": "team",
         "team_members": [
-            {"student_number": "2025080903", "real_name": "陈同学", "class_name": "信安25-2班"}
+            {"student_number": "08250903", "real_name": "陈同学", "class_name": "02班"}
         ],
     }
     sub2.save()

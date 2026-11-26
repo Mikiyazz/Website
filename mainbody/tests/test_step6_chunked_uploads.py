@@ -6,12 +6,14 @@
 - 最终目录结构        -> test_chunk_complete_writes_promotional_video_path
 - 单片 5MB 立即返回   -> test_chunk_upload_rejects_oversized_part / 直接断言响应体与落盘大小
 """
+from datetime import timedelta
 import hashlib
 from pathlib import Path
 
 import pytest
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.submissions.models import Submission
@@ -143,6 +145,10 @@ def test_chunk_start_blocked_after_submission_locked(client, student, activity):
     submission = create_draft(actor=student, activity_id=activity.id)
     submission.status = Submission.Status.PENDING_FIRST_REVIEW
     submission.save(update_fields=["status", "updated_at"])
+
+    # 活动截止后禁止启动分片上传
+    activity.deadline = timezone.now() - timedelta(hours=1)
+    activity.save(update_fields=["deadline", "updated_at"])
 
     client.force_login(student)
     resp = _start(client, reqs["video"], "宣讲视频.mp4", MB, 1)
@@ -454,26 +460,27 @@ def test_300mb_promotional_video_completes_under_real_chunk_size(client, student
 @pytest.mark.django_db
 def test_apply_page_exposes_chunk_endpoints_and_progress_bar(client, student, activity):
     client.force_login(student)
-    html = client.get("/submissions/apply/").content.decode("utf-8")
+    apply_html = client.get("/submissions/apply/").content.decode("utf-8")
+    outcomes_html = client.get("/submissions/outcomes/").content.decode("utf-8")
 
-    assert 'data-chunk-start-url="/api/v1/uploads/chunk-start/"' in html
-    assert 'data-chunk-upload-url="/api/v1/uploads/chunk-upload/"' in html
-    assert 'data-chunk-complete-url="/api/v1/uploads/chunk-complete/"' in html
-    assert 'data-direct-upload-url="/api/v1/uploads/direct-upload/"' in html
-    assert 'data-upload-locked="false"' in html
+    for html in (apply_html, outcomes_html):
+        assert 'data-chunk-start-url="/api/v1/uploads/chunk-start/"' in html
+        assert 'data-chunk-upload-url="/api/v1/uploads/chunk-upload/"' in html
+        assert 'data-chunk-complete-url="/api/v1/uploads/chunk-complete/"' in html
+        assert 'data-direct-upload-url="/api/v1/uploads/direct-upload/"' in html
+        assert 'data-upload-locked="false"' in html
 
-    # Tabler 进度条组件（页面顶部，上传中常显）
-    assert 'id="upload-progress-bar"' in html
-    assert 'class="progress progress-sm"' in html
-    assert 'id="upload-progress-fill"' in html
-    assert 'id="upload-progress-percent"' in html
-    assert "断点续传" in html
+        # Tabler 进度条组件（页面顶部，上传中常显）
+        assert 'id="upload-progress-bar"' in html
+        assert 'class="progress progress-sm"' in html
+        assert 'id="upload-progress-fill"' in html
+        assert 'id="upload-progress-percent"' in html
+        assert "断点续传" in html
+        assert "下一次迭代接入" not in html
 
-    # 旧骨架提示不再出现
-    assert "下一次迭代接入" not in html
-
-    # FilePond 五个实例仍然都在（本任务只换 video 的上传通道）
-    assert html.count('class="filepond-zone"') == 5
+    # 五个上传实例拆分到两个独立栏目：申报页 1 个（.docx 申报表）+ 成果收集页 4 个（含视频分片）
+    assert apply_html.count('class="filepond-zone"') == 1
+    assert outcomes_html.count('class="filepond-zone"') == 4
 
 
 def test_wizard_js_splits_video_into_5mb_chunks_and_guards_unload():
@@ -497,6 +504,9 @@ def test_locked_application_disables_upload_zones(client, student, activity):
     submission = create_draft(actor=student, activity_id=activity.id)
     submission.status = Submission.Status.PENDING_FIRST_REVIEW
     submission.save(update_fields=["status", "updated_at"])
+
+    activity.deadline = timezone.now() - timedelta(hours=1)
+    activity.save(update_fields=["deadline", "updated_at"])
 
     html = client.get("/submissions/apply/").content.decode("utf-8")
     assert 'data-upload-locked="true"' in html

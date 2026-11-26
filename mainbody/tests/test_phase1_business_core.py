@@ -18,14 +18,20 @@ from django.contrib.admin.sites import AdminSite
 def test_student_registration_success(db):
     """测试学生自主注册成功，密码哈希加密，角色强制写死为 student。"""
     user = register_student(
-        student_number="20250101",
+        student_number="08250101",
         real_name="张三",
-        class_name="计算机25-1班",
+        grade="2025级",
+        major="计算机科学与技术",
+        class_name="01班",
+        phone="13800138001",
         password="plain_password_123",
     )
-    assert user.username == "20250101"
+    assert user.username == "08250101"
     assert user.real_name == "张三"
-    assert user.class_name == "计算机25-1班"
+    assert user.grade == "2025级"
+    assert user.major == "计算机科学与技术"
+    assert user.class_name == "01班"
+    assert user.phone == "13800138001"
     assert user.role == User.Role.STUDENT
     # 验证密码经过哈希加密
     assert user.password != "plain_password_123"
@@ -35,9 +41,12 @@ def test_student_registration_success(db):
 def test_student_registration_forces_student_role_ignoring_frontend_tamper(client, db):
     """测试通过 API 注册时，即使前端传了 role='college_admin'，后端也强制写死为 student。"""
     payload = {
-        "student_number": "20250102",
+        "student_number": "08250102",
         "real_name": "李四",
-        "class_name": "计算机25-2班",
+        "grade": "2025级",
+        "major": "软件工程",
+        "class_name": "02班",
+        "phone": "13800138002",
         "password": "mypassword888",
         "role": "college_admin",  # 试图提权
         "is_staff": True,
@@ -45,7 +54,7 @@ def test_student_registration_forces_student_role_ignoring_frontend_tamper(clien
     }
     response = client.post("/api/v1/accounts/register/", payload, content_type="application/json")
     assert response.status_code == 201
-    user = User.objects.get(username="20250102")
+    user = User.objects.get(username="08250102")
     assert user.role == User.Role.STUDENT
     assert user.is_staff is False
     assert user.is_superuser is False
@@ -54,30 +63,62 @@ def test_student_registration_forces_student_role_ignoring_frontend_tamper(clien
 def test_registration_duplicate_student_number_fails(db):
     """测试学号查重逻辑：重复学号注册抛出 409 Conflict。"""
     register_student(
-        student_number="20250103",
+        student_number="08250103",
         real_name="王五",
-        class_name="信安25-1班",
+        grade="2025级",
+        major="信息安全",
+        class_name="01班",
+        phone="13800138003",
         password="password1",
     )
     with pytest.raises(Conflict):
         register_student(
-            student_number="20250103",
+            student_number="08250103",
             real_name="王五重名",
-            class_name="信安25-2班",
+            grade="2025级",
+            major="信息安全",
+            class_name="02班",
+            phone="13800138004",
             password="password2",
         )
 
 
 def test_registration_validation_rules(db):
-    """测试注册字段非空和格式校验。"""
-    with pytest.raises(DomainError):
-        register_student(student_number="", real_name="测试", class_name="班级", password="123456")
-    with pytest.raises(DomainError):
-        register_student(student_number="20259999", real_name="", class_name="班级", password="123456")
-    with pytest.raises(DomainError):
-        register_student(student_number="20259999", real_name="测试", class_name="", password="123456")
-    with pytest.raises(DomainError):
-        register_student(student_number="20259999", real_name="测试", class_name="班级", password="123")
+    """测试注册字段非空和全套格式强校验。"""
+    base = {
+        "student_number": "08259999",
+        "real_name": "测试同学",
+        "grade": "2025级",
+        "major": "信息安全",
+        "class_name": "01班",
+        "phone": "13800138999",
+        "password": "123456",
+    }
+    invalid_cases = [
+        {"student_number": ""},
+        {"student_number": "1234567"},        # 7位
+        {"student_number": "2025080901"},     # 10位
+        {"student_number": "0825abcd"},       # 非数字
+        {"real_name": ""},
+        {"grade": ""},
+        {"grade": "大二"},                     # 非202X级
+        {"grade": "2025"},                    # 缺“级”
+        {"grade": "2019级"},                  # 非202X级
+        {"major": ""},
+        {"major": "网络空间安全"},             # 自定义专业被拒
+        {"class_name": ""},
+        {"class_name": "1班"},                # 个位数未补0
+        {"class_name": "00班"},               # 00班非法
+        {"class_name": "信安25-1班"},          # 旧格式被拒
+        {"phone": ""},
+        {"phone": "1380013800"},              # 10位
+        {"phone": "138001380001"},            # 12位
+        {"password": "12345"},                # 自定义少于6位
+    ]
+    for patch in invalid_cases:
+        params = {**base, **patch}
+        with pytest.raises(DomainError):
+            register_student(**params)
 
 
 def test_admin_actions_and_search_fields(db):
@@ -138,11 +179,13 @@ def test_submission_overwrites_same_row_and_creates_snapshot(student, activity):
     assert rev.snapshot == {"title": "草稿V2", "content": "新版覆盖"}
     assert sub.revisions.count() == 1
 
-    # 待初审状态下，不允许再次保存草稿或再次提交
-    with pytest.raises(Conflict):
-        save_draft(actor=student, submission_id=sub.pk, expected_version=3, data={"title": "篡改"})
-    with pytest.raises(Conflict):
-        submit_for_review(actor=student, submission_id=sub.pk)
+    # 活动开放期内，已提交状态下仍允许修改保存并重新提交覆盖原记录
+    save_draft(actor=student, submission_id=sub.pk, expected_version=3, data={"title": "草稿V3", "content": "提交后修改覆盖"})
+    sub, rev2 = submit_for_review(actor=student, submission_id=sub.pk)
+    assert sub.status == Submission.Status.PENDING_FIRST_REVIEW
+    assert rev2.number == 2
+    assert rev2.snapshot == {"title": "草稿V3", "content": "提交后修改覆盖"}
+    assert Submission.objects.filter(owner=student, activity=activity).count() == 1
 
 
 def test_cannot_submit_empty_draft(student, activity):

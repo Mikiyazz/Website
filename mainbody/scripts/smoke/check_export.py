@@ -76,5 +76,5 @@ names = archive.namelist()
 print("PASS export entries:", len(names))
 for name in names:
     print("   ", name)
-assert any(name.startswith("2025080902_") for name in names)
-assert any(name.endswith("社会实践申报表.docx") for name in names)
+assert any("2025080902/" in name for name in names)
+assert any(name.endswith("/申报表.docx") or name.endswith("/late_申报表.docx") for name in names)

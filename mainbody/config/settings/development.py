@@ -6,6 +6,7 @@ from .base import *  # noqa: F403
 DEBUG = True
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 STORAGES["staticfiles"] = {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}
+WHITENOISE_MAX_AGE = 0
 
 
 def _is_service_reachable(host: str, port: int) -> bool:

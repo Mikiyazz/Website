@@ -12,13 +12,18 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from apps.accounts.models import User
 from apps.accounts.permissions import (
+    format_user_class_label,
     is_college_admin,
+    is_reviewer,
+    is_target_in_reviewer_scope,
     require_college_admin,
     require_reviewer_or_admin,
     require_student,
+    reviewer_allowed_class_names,
+    reviewer_user_scope_q,
 )
 from apps.accounts.models import StudentRoster
-from apps.activities.models import Activity
+from apps.activities.models import Activity, DEFAULT_PROJECT_CATEGORIES, parse_project_categories
 from apps.activities.selectors import eligible_activities, is_activity_open_for_user
 from apps.activities.services import (
     parse_student_numbers,
@@ -31,6 +36,8 @@ from apps.common.errors import DomainError, Forbidden
 from apps.exports.services import list_activity_declared_classes, resolve_status_filter
 from apps.reviews.selectors import (
     collect_workbench_rows,
+    declaration_type_filter_q,
+    normalize_declaration_type_filter,
     reviewable_submissions,
     workbench_activities,
     workbench_class_options,
@@ -39,10 +46,21 @@ from apps.reviews.selectors import (
 from apps.reviews.services import review_submission
 from apps.reviews.views import serialize_submission_for_review
 from apps.submissions.models import Submission
-from apps.submissions.services import create_draft, save_draft, submit_for_review
-from apps.uploads.models import FileAsset, UploadSession
+from apps.submissions.services import (
+    _team_submission_priority,
+    can_delete_submission,
+    create_draft,
+    find_team_membership_activity_ids,
+    find_team_membership_submissions,
+    first_approved_submission_ids,
+    is_empty_draft_submission,
+    map_activity_team_memberships_all,
+    save_draft,
+    submit_for_review,
+)
+from apps.submissions.views import _summarize_submission_card
 from apps.uploads.policies import INLINE_PREVIEW_EXTENSIONS, STANDARD_MATERIAL_RULES
-from apps.uploads.services import ensure_standard_material_requirements
+from apps.uploads.services import ensure_standard_material_requirements, map_uploads_by_submission
 from .services import change_password, register_student
 
 
@@ -152,14 +170,16 @@ def student_lookup_view(request):
 
 @require_http_methods(["GET", "POST"])
 def register_page_view(request):
-    grade_choices = User.Grade.choices
+    from apps.accounts.models import MAJOR_CHOICES
+
     if request.method == "GET":
         return render(
             request,
             "registration/register.html",
             {
-                "grade_choices": grade_choices,
+                "major_choices": MAJOR_CHOICES,
                 "form_data": {},
+                "field_errors": {},
             },
         )
 
@@ -186,12 +206,14 @@ def register_page_view(request):
             phone=form_data["phone"],
         )
     except DomainError as exc:
+        field_errors = getattr(exc, "field_errors", None) or {}
         return render(
             request,
             "registration/register.html",
             {
-                "grade_choices": grade_choices,
+                "major_choices": MAJOR_CHOICES,
                 "form_data": form_data,
+                "field_errors": field_errors,
                 "error_message": str(exc),
             },
             status=exc.status,
@@ -233,7 +255,7 @@ def change_password_page_view(request):
             status=exc.status,
         )
 
-    messages.success(request, "密码修改成功！首次改密提醒已解除。")
+    messages.success(request, "密码修改成功！")
     next_url = request.POST.get("next") or request.GET.get("next") or "/"
     return redirect(next_url)
 
@@ -253,22 +275,51 @@ def _format_bytes(num_bytes: int) -> str:
 def _build_student_workbench_context(request):
     user = request.user
     eligible_qs = eligible_activities(user)
-    submitted_act_ids = list(
+    submitted_act_ids = set(
         Submission.objects.filter(owner=user).values_list("activity_id", flat=True)
-    )
+    ) | find_team_membership_activity_ids(user.username)
     all_acts = list(Activity.objects.all().order_by("-created_at")[:100])
-    eligible_id_set = set(eligible_qs.values_list("id", flat=True)) | set(submitted_act_ids)
+    eligible_id_set = set(eligible_qs.values_list("id", flat=True)) | submitted_act_ids
     for act in all_acts:
         if act.is_in_late_whitelist(user.username):
             eligible_id_set.add(act.id)
 
     activities = [act for act in all_acts if act.id in eligible_id_set]
-    submissions_by_act = {
-        sub.activity_id: sub
-        for sub in Submission.objects.filter(owner=user, activity__in=activities)
-    }
+    own_submissions_by_act: dict[uuid.UUID, list[Submission]] = {}
+    for sub in (
+        Submission.objects.select_related("owner")
+        .filter(owner=user, activity__in=activities)
+        .order_by("-updated_at", "-created_at")
+    ):
+        own_submissions_by_act.setdefault(sub.activity_id, []).append(sub)
 
-    selected_act_id = request.GET.get("activity_id")
+    team_submissions_by_act: dict[uuid.UUID, list[Submission]] = {}
+    submissions_by_act = {}
+    team_member_act_ids = set()
+    for act in activities:
+        own_subs = own_submissions_by_act.get(act.id, [])
+        team_subs = [
+            sub
+            for sub in find_team_membership_submissions(activity=act, student_number=user.username)
+            if sub.owner_id != user.id
+        ]
+        team_submissions_by_act[act.id] = team_subs
+        if own_subs:
+            submissions_by_act[act.id] = own_subs[0]
+        elif team_subs:
+            submissions_by_act[act.id] = team_subs[0]
+            team_member_act_ids.add(act.id)
+
+    requested_sub_id = (request.GET.get("submission_id") or "").strip()
+    selected_act_id = (request.GET.get("activity_id") or "").strip()
+    if not selected_act_id and requested_sub_id:
+        try:
+            hinted_sub = Submission.objects.filter(pk=uuid.UUID(requested_sub_id)).only("activity_id").first()
+            if hinted_sub is not None:
+                selected_act_id = str(hinted_sub.activity_id)
+        except ValueError:
+            pass
+
     selected_activity = None
     if selected_act_id:
         for act in activities:
@@ -281,6 +332,8 @@ def _build_student_workbench_context(request):
     activity_cards = []
     for act in activities:
         sub = submissions_by_act.get(act.id)
+        own_count = len(own_submissions_by_act.get(act.id, []))
+        member_count = len(team_submissions_by_act.get(act.id, []))
         can_write_now, window_label = is_activity_open_for_user(act, user)
         in_whitelist = act.is_in_late_whitelist(user.username)
         status_code = sub.status if sub else Submission.Status.DRAFT
@@ -291,6 +344,8 @@ def _build_student_workbench_context(request):
             {
                 "activity": act,
                 "submission": sub,
+                "submission_count": own_count + member_count,
+                "own_submission_count": own_count,
                 "status_code": status_code,
                 "status_display": status_display,
                 "badge_code": badge_code,
@@ -303,29 +358,101 @@ def _build_student_workbench_context(request):
         )
 
     submission = None
+    own_submission_items = []
+    member_submission_items = []
+    all_submission_items = []
+    selected_can_write_now = False
+    is_team_member_view = False
+    team_leader = None
     is_locked = True
     lock_reason = ""
     is_returned = False
     latest_returned_record = None
     review_records = []
+    default_category = (
+        selected_activity.get_project_categories()[0]
+        if selected_activity is not None
+        else DEFAULT_PROJECT_CATEGORIES[0]
+    )
     draft_data = {
         "project_name": "",
-        "category": "社会调查",
+        "category": default_category,
+        "advisor_name": "",
+        "practice_place": "",
+        "date_start": "",
+        "date_end": "",
+        "project_intro": "",
         "declaration_type": "individual",
         "team_members": [],
     }
     material_sections = []
+    uploads_by_req = {}
+    active_uploads = []
 
     if selected_activity is not None:
         reqs_map = ensure_standard_material_requirements(selected_activity)
         can_write_now, window_label = is_activity_open_for_user(selected_activity, user)
-        submission = submissions_by_act.get(selected_activity.id)
-        if submission is None and can_write_now:
-            try:
-                submission = create_draft(actor=user, activity_id=selected_activity.id)
-                submissions_by_act[selected_activity.id] = submission
-            except (DomainError, Forbidden):
-                pass
+        selected_can_write_now = can_write_now
+        own_subs = list(own_submissions_by_act.get(selected_activity.id, []))
+        team_subs = list(team_submissions_by_act.get(selected_activity.id, []))
+
+        if requested_sub_id:
+            for item in own_subs:
+                if str(item.id) == requested_sub_id:
+                    submission = item
+                    break
+            if submission is None:
+                for item in team_subs:
+                    if str(item.id) == requested_sub_id:
+                        submission = item
+                        is_team_member_view = True
+                        team_leader = item.owner
+                        break
+
+        skip_autocreate = (request.GET.get("deleted") or "").strip() == "1"
+        if submission is None:
+            non_empty_own = [item for item in own_subs if not is_empty_draft_submission(item)]
+            if non_empty_own:
+                submission = non_empty_own[0]
+            elif team_subs:
+                submission = team_subs[0]
+                is_team_member_view = True
+                team_leader = submission.owner
+            elif own_subs:
+                submission = own_subs[0]
+            elif can_write_now and not skip_autocreate:
+                try:
+                    submission = create_draft(actor=user, activity_id=selected_activity.id)
+                    own_subs.insert(0, submission)
+                    own_submissions_by_act[selected_activity.id] = own_subs
+                except (DomainError, Forbidden):
+                    pass
+
+        uploads_map = map_uploads_by_submission(own_subs + team_subs, activity=selected_activity)
+        first_approved_ids = first_approved_submission_ids([item.id for item in own_subs])
+        own_submission_items = [
+            _summarize_submission_card(
+                item,
+                uploads=uploads_map.get(item.id, []),
+                is_team_member=False,
+                is_selected=bool(submission and item.id == submission.id),
+                can_write_now=can_write_now,
+                has_passed_first_review=item.id in first_approved_ids,
+            )
+            for item in own_subs
+        ]
+        member_submission_items = [
+            _summarize_submission_card(
+                item,
+                uploads=uploads_map.get(item.id, []),
+                is_team_member=True,
+                is_selected=bool(submission and item.id == submission.id),
+                can_write_now=False,
+                has_passed_first_review=True,
+            )
+            for item in team_subs
+        ]
+        all_submission_items = own_submission_items + member_submission_items
 
         if submission is not None:
             raw_draft = submission.draft_data if isinstance(submission.draft_data, dict) else {}
@@ -335,7 +462,12 @@ def _build_student_workbench_context(request):
                 decl_type = "team" if team_members else "individual"
             draft_data = {
                 "project_name": str(raw_draft.get("project_name") or raw_draft.get("title") or "").strip(),
-                "category": str(raw_draft.get("category") or "社会调查").strip() or "社会调查",
+                "category": str(raw_draft.get("category") or default_category).strip() or default_category,
+                "advisor_name": str(raw_draft.get("advisor_name") or "").strip(),
+                "practice_place": str(raw_draft.get("practice_place") or "").strip(),
+                "date_start": str(raw_draft.get("date_start") or "").strip(),
+                "date_end": str(raw_draft.get("date_end") or "").strip(),
+                "project_intro": str(raw_draft.get("project_intro") or "").strip(),
                 "declaration_type": decl_type,
                 "team_members": team_members,
             }
@@ -350,33 +482,25 @@ def _build_student_workbench_context(request):
                     .order_by("-created_at")
                     .first()
                 )
-            if submission.status in (
-                Submission.Status.PENDING_FIRST_REVIEW,
-                Submission.Status.PENDING_FINAL_REVIEW,
-                Submission.Status.FINAL_APPROVED,
-            ):
+            from apps.submissions.services import is_submission_locked_for_student
+
+            if is_team_member_view and team_leader is not None:
                 is_locked = True
-                lock_reason = f"当前申报状态为【{submission.get_status_display()}】，表单与材料上传区已只读锁定。"
+                leader_label = f"{team_leader.real_name or team_leader.username}（{team_leader.username}）"
+                lock_reason = f"当前查看的是由队长 {leader_label} 发起的团队申报，您作为团队成员可查看进度与材料。"
+            elif is_submission_locked_for_student(submission):
+                is_locked = True
+                lock_reason = f"当前材料状态为「{submission.get_status_display()}」，已进入只读锁定状态；如需修改，请联系审核人员打回。"
             elif not can_write_now:
                 is_locked = True
-                lock_reason = f"当前活动{window_label}，表单与材料上传区已只读锁定。"
+                lock_reason = f"当前活动{window_label}，当前申报已只读锁定。"
             else:
                 is_locked = False
         else:
             is_locked = True
             lock_reason = f"当前活动{window_label}，暂不可创建或修改申报。"
 
-        active_uploads = list(
-            UploadSession.objects.select_related("requirement", "fileasset")
-            .filter(
-                owner=user,
-                requirement__activity=selected_activity,
-                status=UploadSession.Status.COMPLETE,
-                fileasset__status=FileAsset.Status.VALID,
-            )
-            .order_by("created_at")
-        )
-        uploads_by_req = {}
+        active_uploads = uploads_map.get(submission.id, []) if submission is not None else []
         for up in active_uploads:
             ext = "." + up.original_name.rsplit(".", 1)[-1].lower() if "." in up.original_name else ""
             can_inline = ext in INLINE_PREVIEW_EXTENSIONS
@@ -415,6 +539,8 @@ def _build_student_workbench_context(request):
                 {
                     "requirement": req,
                     "code": code,
+                    "stage": "declaration" if code == "application_form" else "outcomes",
+                    "stage_label": "项目申报" if code == "application_form" else "成果收集",
                     "title": req.title,
                     "required": req.required,
                     "min_count": req.min_count,
@@ -431,11 +557,73 @@ def _build_student_workbench_context(request):
                 }
             )
 
+    app_count = len(uploads_by_req.get("application_form", []))
+    rep_count = len(uploads_by_req.get("practice_report", []))
+    photo_count = len(uploads_by_req.get("scene_photos", []))
+    vid_count = len(uploads_by_req.get("video", []))
+    oth_count = len(uploads_by_req.get("other_materials", []))
+    uploaded_categories = sum(1 for c in (app_count, rep_count, photo_count, vid_count, oth_count) if c > 0)
+    has_basic = bool(draft_data["project_name"])
+    is_team = draft_data["declaration_type"] == "team"
+    team_count = len(draft_data["team_members"])
+    team_ready = (not is_team) or team_count > 0
+    declaration_submitted_flag = bool(submission and submission.declaration_submitted)
+    submitted_at = submission.declaration_submitted_at if submission else None
+    declaration_submitted = declaration_submitted_flag and any(
+        up.requirement.code == "application_form"
+        and (submitted_at is None or up.created_at <= submitted_at)
+        for up in active_uploads
+    )
+    outcomes_submitted = bool(
+        submission
+        and submission.status
+        in (
+            Submission.Status.PENDING_FIRST_REVIEW,
+            Submission.Status.PENDING_FINAL_REVIEW,
+            Submission.Status.FINAL_APPROVED,
+        )
+    )
+    checks = {
+        "declaration": declaration_submitted,
+        "outcomes": outcomes_submitted,
+    }
+    required_done = int(app_count >= 1) + int(rep_count >= 1) + int(photo_count >= 3)
+    outcomes_required_done = int(rep_count >= 1) + int(photo_count >= 3)
+    checklist_done = int(checks["declaration"]) + int(checks["outcomes"])
+    student_overview = {
+        "uploaded_categories": uploaded_categories,
+        "has_basic": has_basic,
+        "is_team": is_team,
+        "team_count": team_count,
+        "team_ready": team_ready,
+        "declaration_submitted": declaration_submitted,
+        "declaration_submitted_at": submission.declaration_submitted_at if submission else None,
+        "outcomes_submitted": outcomes_submitted,
+        "checks": checks,
+        "required_done": required_done,
+        "outcomes_required_done": outcomes_required_done,
+        "checklist_done": checklist_done,
+        "progress_percent": round((checklist_done / 2) * 100),
+        "total_files": sum(len(sec["uploads"]) for sec in material_sections),
+    }
+
+    can_delete_current = bool(
+        submission is not None
+        and not is_team_member_view
+        and selected_can_write_now
+        and can_delete_submission(submission)
+    )
+
     return {
         "workbench_role": "student",
         "activity_cards": activity_cards,
         "selected_activity": selected_activity,
+        "selected_can_write_now": selected_can_write_now,
         "submission": submission,
+        "can_delete_current": can_delete_current,
+        "own_submission_items": own_submission_items,
+        "member_submission_items": member_submission_items,
+        "all_submission_items": all_submission_items,
         "status_code": submission.status if submission else Submission.Status.DRAFT,
         "status_display": submission.get_status_display() if submission else "草稿",
         # 徽章口径与审核工作台一致：命中补交白名单的迟交材料显示 LATE_SUBMITTED。
@@ -443,19 +631,209 @@ def _build_student_workbench_context(request):
         "status_badge_label": submission.badge_label if submission else "草稿",
         "is_locked": is_locked,
         "lock_reason": lock_reason,
+        "is_team_member_view": is_team_member_view,
+        "team_leader": team_leader,
         "is_returned": is_returned,
         "latest_returned_record": latest_returned_record,
         "review_records": review_records,
         "draft_data": draft_data,
         "team_members_json": json.dumps(draft_data["team_members"], ensure_ascii=False),
         "material_sections": material_sections,
+        "student_overview": student_overview,
+    }
+
+
+def _build_admin_account_progress(request, selected_activity, *, actor=None):
+    """构建注册账号信息与提交情况板块数据：管理员看全院，团支书仅看本班。"""
+    viewer = actor or request.user
+    viewer_is_admin = is_college_admin(viewer)
+    selected_activity_id = selected_activity.id if selected_activity is not None else None
+
+    acct_submit_filter = (request.GET.get("acct_submit") or "").strip()
+    acct_class_filter = (request.GET.get("acct_class") or "").strip()
+    acct_decl_type_filter = (request.GET.get("acct_decl_type") or "").strip()
+    acct_q_filter = (request.GET.get("acct_q") or "").strip()
+
+    registered_qs = User.objects.filter(role=User.Role.STUDENT, is_active=True)
+    if not viewer_is_admin:
+        registered_qs = registered_qs.filter(
+            reviewer_user_scope_q(viewer, prefix="", activity_id=selected_activity_id)
+        )
+    registered_users = list(registered_qs.order_by("grade", "major", "class_name", "username"))
+    acct_classes = sorted({u.class_name for u in registered_users if u.class_name})
+
+    own_subs_by_uid: dict[int, list[Submission]] = {}
+    team_memberships: dict[str, list[Submission]] = {}
+    app_form_uploads_by_sub_id: dict[uuid.UUID, list] = {}
+    if selected_activity is not None:
+        all_subs = list(
+            Submission.objects.select_related("owner")
+            .filter(activity=selected_activity)
+            .order_by("-updated_at")
+        )
+        for sub in all_subs:
+            own_subs_by_uid.setdefault(sub.owner_id, []).append(sub)
+        team_memberships = map_activity_team_memberships_all(selected_activity.id)
+        app_form_uploads_by_sub_id = map_uploads_by_submission(
+            all_subs,
+            activity=selected_activity,
+            requirement_code="application_form",
+        )
+
+    def _sub_decl_done(sub: Submission) -> bool:
+        submitted_at = sub.declaration_submitted_at
+        forms = app_form_uploads_by_sub_id.get(sub.id, [])
+        return bool(sub.declaration_submitted) and any(
+            submitted_at is None or up.created_at <= submitted_at for up in forms
+        )
+
+    def _sub_outcomes_done(sub: Submission) -> bool:
+        return sub.status in (
+            Submission.Status.PENDING_FIRST_REVIEW,
+            Submission.Status.PENDING_FINAL_REVIEW,
+            Submission.Status.FINAL_APPROVED,
+        )
+
+    all_rows = []
+    for stu in registered_users:
+        own_subs = [s for s in own_subs_by_uid.get(stu.id, []) if not is_empty_draft_submission(s)]
+        team_subs = [s for s in team_memberships.get(stu.username, []) if s.owner_id != stu.id]
+
+        candidates: list[tuple[Submission, bool]] = [(s, False) for s in own_subs] + [(s, True) for s in team_subs]
+        candidates.sort(
+            key=lambda pair: (
+                1 if _sub_outcomes_done(pair[0]) else 0,
+                1 if _sub_decl_done(pair[0]) else 0,
+                _team_submission_priority(pair[0]),
+                0 if not pair[1] else -1,
+            ),
+            reverse=True,
+        )
+
+        if candidates:
+            eff_sub, is_member_pick = candidates[0]
+            can_view_submission = bool(
+                viewer_is_admin
+                or is_target_in_reviewer_scope(viewer, eff_sub.owner, activity_id=selected_activity_id)
+            )
+            if is_member_pick:
+                participation_type = "team"
+                participation_role = "member"
+                leader = eff_sub.owner
+                leader_label = f"{leader.real_name or leader.username}（{leader.username}）" if can_view_submission else ""
+                participation_label = "团队申报（队员）"
+            else:
+                raw_draft = eff_sub.draft_data if isinstance(eff_sub.draft_data, dict) else {}
+                is_team = raw_draft.get("declaration_type") == Submission.DeclarationType.TEAM or bool(
+                    raw_draft.get("team_members")
+                )
+                participation_type = "team" if is_team else "individual"
+                participation_role = "leader" if is_team else "individual"
+                leader_label = ""
+                participation_label = "团队申报（队长）" if is_team else "个人申报"
+            if len(candidates) > 1:
+                participation_label = f"{participation_label} · 共 {len(candidates)} 项"
+        else:
+            eff_sub = None
+            can_view_submission = False
+            participation_type = "none"
+            participation_role = "none"
+            leader_label = ""
+            participation_label = "未申报"
+
+        if eff_sub is not None:
+            raw_draft = eff_sub.draft_data if isinstance(eff_sub.draft_data, dict) else {}
+            project_name = str(raw_draft.get("project_name") or raw_draft.get("title") or "").strip()
+            decl_submitted = any(_sub_decl_done(sub) for sub, _ in candidates)
+            outcomes_submitted = any(_sub_outcomes_done(sub) for sub, _ in candidates)
+            status_code = eff_sub.status
+            status_label = eff_sub.get_status_display()
+            submission_id = str(eff_sub.id) if can_view_submission else ""
+        else:
+            project_name = ""
+            decl_submitted = False
+            outcomes_submitted = False
+            status_code = "none"
+            status_label = "未提交"
+            submission_id = ""
+
+        all_rows.append(
+            {
+                "student_number": stu.username,
+                "real_name": stu.real_name or stu.username,
+                "class_name": stu.class_name or "-",
+                "class_display": format_user_class_label(stu) or "-",
+                "grade": stu.grade or "",
+                "major": stu.major or "",
+                "phone": stu.phone or "",
+                "participation_type": participation_type,
+                "participation_role": participation_role,
+                "participation_label": participation_label,
+                "team_leader_label": leader_label,
+                "project_name": project_name,
+                "declaration_submitted": decl_submitted,
+                "outcomes_submitted": outcomes_submitted,
+                "status_code": status_code,
+                "status_label": status_label,
+                "submission_id": submission_id,
+                "can_view_submission": can_view_submission,
+            }
+        )
+
+    summary = {
+        "total": len(all_rows),
+        "decl_submitted": sum(1 for r in all_rows if r["declaration_submitted"]),
+        "decl_unsubmitted": sum(1 for r in all_rows if not r["declaration_submitted"]),
+        "outcomes_submitted": sum(1 for r in all_rows if r["outcomes_submitted"]),
+        "outcomes_unsubmitted": sum(1 for r in all_rows if not r["outcomes_submitted"]),
+        "any_unsubmitted": sum(1 for r in all_rows if (not r["declaration_submitted"] or not r["outcomes_submitted"])),
+        "both_unsubmitted": sum(1 for r in all_rows if (not r["declaration_submitted"] and not r["outcomes_submitted"])),
+        "both_submitted": sum(1 for r in all_rows if (r["declaration_submitted"] and r["outcomes_submitted"])),
+    }
+
+    filtered_rows = all_rows
+    if acct_class_filter:
+        filtered_rows = [r for r in filtered_rows if r["class_name"] == acct_class_filter]
+    if acct_decl_type_filter in ("individual", "team", "none"):
+        filtered_rows = [r for r in filtered_rows if r["participation_type"] == acct_decl_type_filter]
+    if acct_q_filter:
+        q_lower = acct_q_filter.lower()
+        filtered_rows = [
+            r
+            for r in filtered_rows
+            if q_lower in r["student_number"].lower()
+            or q_lower in r["real_name"].lower()
+            or q_lower in r["project_name"].lower()
+        ]
+    if acct_submit_filter == "any_unsubmitted":
+        filtered_rows = [r for r in filtered_rows if (not r["declaration_submitted"] or not r["outcomes_submitted"])]
+    elif acct_submit_filter == "decl_unsubmitted":
+        filtered_rows = [r for r in filtered_rows if not r["declaration_submitted"]]
+    elif acct_submit_filter == "outcome_unsubmitted":
+        filtered_rows = [r for r in filtered_rows if not r["outcomes_submitted"]]
+    elif acct_submit_filter == "both_unsubmitted":
+        filtered_rows = [r for r in filtered_rows if (not r["declaration_submitted"] and not r["outcomes_submitted"])]
+    elif acct_submit_filter == "decl_only":
+        filtered_rows = [r for r in filtered_rows if (r["declaration_submitted"] and not r["outcomes_submitted"])]
+    elif acct_submit_filter == "both_submitted":
+        filtered_rows = [r for r in filtered_rows if (r["declaration_submitted"] and r["outcomes_submitted"])]
+
+    return {
+        "account_progress_rows": filtered_rows,
+        "account_progress_filtered_count": len(filtered_rows),
+        "account_progress_summary": summary,
+        "account_progress_classes": acct_classes,
+        "acct_submit_filter": acct_submit_filter,
+        "acct_class_filter": acct_class_filter,
+        "acct_decl_type_filter": acct_decl_type_filter,
+        "acct_q_filter": acct_q_filter,
     }
 
 
 def _build_reviewer_and_admin_context(request):
     user = request.user
     is_admin = is_college_admin(user)
-    activities = list(Activity.objects.all().order_by("-created_at")[:100])
+    activities = list(workbench_activities(user)[:100])
 
     selected_act_id = request.GET.get("activity_id")
     selected_activity = None
@@ -469,11 +847,20 @@ def _build_reviewer_and_admin_context(request):
 
     status_filter = request.GET.get("status", "").strip()
     class_filter = (request.GET.get("class_name") or request.GET.get("class") or "").strip()
+    category_filter = (request.GET.get("category") or "").strip()
+    declaration_type_filter = normalize_declaration_type_filter(request.GET.get("declaration_type"))
     selected_submission_id = request.GET.get("submission_id", "").strip()
 
     submission_items = []
     available_classes = []
     declared_classes = []
+    allowed_reviewer_classes = (
+        None
+        if is_admin
+        else reviewer_allowed_class_names(
+            user, activity_id=selected_activity.id if selected_activity is not None else None
+        )
+    )
     stats = {
         "total": 0,
         "pending_first_review": 0,
@@ -491,15 +878,22 @@ def _build_reviewer_and_admin_context(request):
             if s.status in stats:
                 stats[s.status] += 1
 
-        declared_classes = list_activity_declared_classes(actor=user, activity_id=selected_activity.id)
-        user_classes = list(
-            User.objects.filter(role=User.Role.STUDENT)
-            .exclude(class_name="")
-            .order_by("class_name")
-            .values_list("class_name", flat=True)
-            .distinct()
-        )
-        available_classes = sorted(set(declared_classes) | set(user_classes))
+        if is_admin:
+            declared_classes = list_activity_declared_classes(actor=user, activity_id=selected_activity.id)
+            user_classes = list(
+                User.objects.filter(role=User.Role.STUDENT)
+                .exclude(class_name="")
+                .order_by("class_name")
+                .values_list("class_name", flat=True)
+                .distinct()
+            )
+            available_classes = sorted(set(declared_classes) | set(user_classes))
+        elif allowed_reviewer_classes:
+            declared_classes = list_activity_declared_classes(actor=user, activity_id=selected_activity.id)
+            available_classes = sorted(set(declared_classes) | set(allowed_reviewer_classes))
+        else:
+            declared_classes = []
+            available_classes = []
 
         filtered_qs = base_qs
         if status_filter:
@@ -511,47 +905,69 @@ def _build_reviewer_and_admin_context(request):
                 pass
         if class_filter:
             filtered_qs = filtered_qs.filter(owner__class_name=class_filter)
+        if category_filter:
+            filtered_qs = filtered_qs.filter(draft_data__category=category_filter)
+        decl_q = declaration_type_filter_q(declaration_type_filter)
+        if decl_q is not None:
+            filtered_qs = filtered_qs.filter(decl_q)
 
         subs = list(filtered_qs.order_by("-updated_at")[:100])
-        owner_ids = [s.owner_id for s in subs]
-        uploads_by_owner = {}
-        if owner_ids:
-            for up in (
-                UploadSession.objects.select_related("requirement", "fileasset")
-                .filter(
-                    owner_id__in=owner_ids,
-                    requirement__activity=selected_activity,
-                    status=UploadSession.Status.COMPLETE,
-                    fileasset__status=FileAsset.Status.VALID,
-                )
-                .order_by("created_at")
-            ):
-                uploads_by_owner.setdefault(up.owner_id, []).append(up)
+        uploads_by_submission = map_uploads_by_submission(subs, activity=selected_activity)
 
         for s in subs:
-            serialized = serialize_submission_for_review(s, uploads_by_owner=uploads_by_owner)
-            serialized["can_first_review"] = s.status == Submission.Status.PENDING_FIRST_REVIEW and (
-                user.role == User.Role.REVIEWER or is_admin
+            serialized = serialize_submission_for_review(s, uploads_by_submission=uploads_by_submission)
+            can_first_role = user.role == User.Role.REVIEWER or is_admin
+            serialized["can_first_review"] = (
+                s.status == Submission.Status.PENDING_FIRST_REVIEW and can_first_role
             )
-            serialized["can_final_review"] = s.status == Submission.Status.PENDING_FINAL_REVIEW and is_admin
+            serialized["can_final_review"] = (
+                s.status == Submission.Status.PENDING_FINAL_REVIEW and is_admin
+            )
+            serialized["can_return_approved"] = (
+                s.status in (Submission.Status.PENDING_FINAL_REVIEW, Submission.Status.FINAL_APPROVED)
+                and can_first_role
+            )
+            serialized["requires_return_confirm"] = s.status in (
+                Submission.Status.PENDING_FINAL_REVIEW,
+                Submission.Status.FINAL_APPROVED,
+            )
             serialized["is_drawer_open"] = str(s.id) == selected_submission_id
             submission_items.append(serialized)
 
     export_classes = declared_classes if declared_classes else available_classes
+    selected_activity_categories = (
+        selected_activity.get_project_categories()
+        if selected_activity is not None
+        else list(DEFAULT_PROJECT_CATEGORIES)
+    )
+    can_export = bool(selected_activity) and (is_admin or bool(allowed_reviewer_classes))
+    reviewer_class_label = "" if is_admin else format_user_class_label(user)
 
-    return {
+    ctx = {
         "workbench_role": "admin" if is_admin else "reviewer",
         "is_college_admin": is_admin,
+        "reviewer_class_label": reviewer_class_label,
+        "can_export": can_export,
+        "show_account_progress": is_admin or is_reviewer(user),
         "activities": activities,
         "selected_activity": selected_activity,
+        "selected_activity_categories": selected_activity_categories,
+        "selected_activity_categories_text": "\n".join(selected_activity_categories),
+        "default_project_categories_text": "\n".join(DEFAULT_PROJECT_CATEGORIES),
+        "selected_activity_has_custom_categories": bool(selected_activity and selected_activity.project_categories),
         "status_filter": status_filter,
         "class_filter": class_filter,
+        "category_filter": category_filter,
+        "declaration_type_filter": declaration_type_filter,
         "available_classes": available_classes,
         "declared_classes": declared_classes,
         "export_classes": export_classes,
         "stats": stats,
         "submission_items": submission_items,
     }
+    if is_admin or is_reviewer(user):
+        ctx.update(_build_admin_account_progress(request, selected_activity, actor=user))
+    return ctx
 
 
 @login_required
@@ -560,6 +976,7 @@ def dashboard_view(request):
     user = request.user
     if is_college_admin(user) or user.role == User.Role.REVIEWER:
         context = _build_reviewer_and_admin_context(request)
+        context["is_admin_panel"] = False
     else:
         context = _build_student_workbench_context(request)
     return render(request, "dashboard.html", context)
@@ -635,7 +1052,7 @@ def student_save_draft_view(request):
             data=draft_payload,
         )
         messages.success(request, "草稿已成功保存！")
-        return redirect(f"/?activity_id={updated.activity_id}")
+        return redirect(f"/?activity_id={updated.activity_id}&submission_id={updated.id}")
     except DomainError as exc:
         messages.error(request, str(exc))
         return HttpResponseBadRequest(str(exc))
@@ -647,7 +1064,7 @@ def student_submit_review_view(request, submission_id):
     try:
         require_student(request.user)
         sub = get_object_or_404(Submission, pk=submission_id, owner=request.user)
-        if "project_name" in request.POST and sub.status in (Submission.Status.DRAFT, Submission.Status.RETURNED):
+        if "project_name" in request.POST:
             draft_payload = _extract_draft_payload_from_post(request)
             if draft_payload.get("project_name"):
                 sub = save_draft(
@@ -657,8 +1074,8 @@ def student_submit_review_view(request, submission_id):
                     data=draft_payload,
                 )
         sub, _ = submit_for_review(actor=request.user, submission_id=sub.id)
-        messages.success(request, "申报材料已正式提交初审！当前表单已只读锁定。")
-        return redirect(f"/?activity_id={sub.activity_id}")
+        messages.success(request, "申报材料已提交初审。")
+        return redirect(f"/?activity_id={sub.activity_id}&submission_id={sub.id}")
     except DomainError as exc:
         messages.error(request, str(exc))
         return HttpResponseBadRequest(str(exc))
@@ -672,11 +1089,22 @@ def review_submission_detail_view(request, submission_id):
     if not reviewable_submissions(request.user, sub.activity_id).filter(pk=sub.pk).exists():
         return HttpResponseForbidden("无权查看该申报记录。")
     is_admin = is_college_admin(request.user)
+    can_first_role = request.user.role == User.Role.REVIEWER or is_admin
     serialized = serialize_submission_for_review(sub)
-    serialized["can_first_review"] = sub.status == Submission.Status.PENDING_FIRST_REVIEW and (
-        request.user.role == User.Role.REVIEWER or is_admin
+    serialized["can_first_review"] = (
+        sub.status == Submission.Status.PENDING_FIRST_REVIEW and can_first_role
     )
-    serialized["can_final_review"] = sub.status == Submission.Status.PENDING_FINAL_REVIEW and is_admin
+    serialized["can_final_review"] = (
+        sub.status == Submission.Status.PENDING_FINAL_REVIEW and is_admin
+    )
+    serialized["can_return_approved"] = (
+        sub.status in (Submission.Status.PENDING_FINAL_REVIEW, Submission.Status.FINAL_APPROVED)
+        and can_first_role
+    )
+    serialized["requires_return_confirm"] = sub.status in (
+        Submission.Status.PENDING_FINAL_REVIEW,
+        Submission.Status.FINAL_APPROVED,
+    )
     return render(
         request,
         "review_detail.html",
@@ -695,6 +1123,7 @@ def review_submission_action_view(request, submission_id):
     sub = get_object_or_404(Submission.objects.select_related("owner", "activity"), pk=submission_id)
     decision = request.POST.get("decision", "").strip()
     comment = request.POST.get("comment", "").strip()
+    confirm_return = request.POST.get("confirm_return", "").strip().lower() in ("1", "true", "yes", "on")
 
     try:
         if decision == "returned" and not comment:
@@ -705,6 +1134,7 @@ def review_submission_action_view(request, submission_id):
             submission_id=sub.id,
             decision=decision,
             comment=comment,
+            confirm_approved_return=confirm_return,
         )
     except Forbidden as exc:
         return HttpResponseForbidden(str(exc))
@@ -726,6 +1156,8 @@ def admin_save_activity_view(request):
     opens_at_raw = request.POST.get("opens_at", "").strip()
     deadline_raw = request.POST.get("deadline", "").strip()
     is_open = request.POST.get("is_open") in ("on", "true", "1", "yes")
+    has_categories_field = "project_categories" in request.POST
+    raw_categories = request.POST.get("project_categories", "")
 
     try:
         opens_at = parse_datetime(opens_at_raw) if opens_at_raw else None
@@ -739,6 +1171,16 @@ def admin_save_activity_view(request):
         if deadline <= opens_at:
             raise DomainError("活动截止时间必须晚于开始时间。")
 
+        parsed_categories = None
+        if has_categories_field:
+            try:
+                normalized_categories = parse_project_categories(raw_categories)
+            except ValueError as exc:
+                raise DomainError(str(exc)) from None
+            parsed_categories = (
+                [] if normalized_categories == list(DEFAULT_PROJECT_CATEGORIES) else normalized_categories
+            )
+
         if activity_id:
             act = get_object_or_404(Activity, pk=activity_id)
             if title:
@@ -746,6 +1188,8 @@ def admin_save_activity_view(request):
             act.opens_at = opens_at
             act.deadline = deadline
             act.is_open = is_open
+            if parsed_categories is not None:
+                act.project_categories = parsed_categories
             act.save()
             action_name = "activity.updated"
         else:
@@ -756,11 +1200,21 @@ def admin_save_activity_view(request):
                 opens_at=opens_at,
                 deadline=deadline,
                 is_open=is_open,
+                project_categories=parsed_categories or [],
             )
             action_name = "activity.created"
 
         ensure_standard_material_requirements(act)
-        record(actor=request.user, action=action_name, target=act, metadata={"title": act.title, "is_open": act.is_open})
+        record(
+            actor=request.user,
+            action=action_name,
+            target=act,
+            metadata={
+                "title": act.title,
+                "is_open": act.is_open,
+                "project_categories": act.get_project_categories(),
+            },
+        )
     except DomainError as exc:
         messages.error(request, str(exc))
         return HttpResponseBadRequest(str(exc))
@@ -804,8 +1258,9 @@ def admin_whitelist_action_view(request, activity_id):
 @require_GET
 @require_college_admin
 def admin_panel_view(request):
-    """学院管理员专用工作台入口。"""
+    """学院管理员专用管理面板入口。"""
     context = _build_reviewer_and_admin_context(request)
+    context["is_admin_panel"] = True
     return render(request, "dashboard.html", context)
 
 
@@ -826,17 +1281,47 @@ def _build_review_workbench_context(request):
     selected_activity = next((act for act in activities if str(act.id) == activity_id), None)
 
     class_filter = (request.GET.get("class_name") or request.GET.get("class") or "").strip()
-    status_filter = (request.GET.get("status") or "").strip()
+    category_filter = (request.GET.get("category") or "").strip()
+    declaration_type_filter = normalize_declaration_type_filter(request.GET.get("declaration_type"))
+    raw_status_filter = (request.GET.get("status") or "").strip()
+    if raw_status_filter == Submission.LATE_SUBMITTED:
+        status_filter = Submission.LATE_SUBMITTED
+    elif raw_status_filter:
+        try:
+            status_filter = resolve_status_filter(raw_status_filter) or ""
+        except DomainError:
+            status_filter = ""
+    else:
+        status_filter = ""
     late_filter = (request.GET.get("late") or "").strip()
 
     whitelist_numbers = workbench_whitelist_numbers(activities=activities, activity_id=activity_id or None)
+    if not is_admin and whitelist_numbers:
+        scoped_sns = set(
+            User.objects.filter(
+                reviewer_user_scope_q(
+                    user,
+                    prefix="",
+                    activity_id=selected_activity.id if selected_activity is not None else None,
+                ),
+                username__in=whitelist_numbers,
+            ).values_list("username", flat=True)
+        )
+        whitelist_numbers = [sn for sn in whitelist_numbers if sn in scoped_sns]
     rows, _ = collect_workbench_rows(
         user=user,
         activity_id=activity_id or None,
         class_name=class_filter,
+        category=category_filter,
+        declaration_type=declaration_type_filter,
         status=status_filter,
         late=late_filter,
         whitelist_numbers=whitelist_numbers,
+    )
+    category_options = (
+        selected_activity.get_project_categories()
+        if selected_activity is not None
+        else list(DEFAULT_PROJECT_CATEGORIES)
     )
 
     status_options = [{"code": code, "label": label, "tone": tone} for code, label, tone in Submission.BADGE_ORDER]
@@ -853,20 +1338,31 @@ def _build_review_workbench_context(request):
     late_settings_saved = request.session.pop("late_settings_saved", False)
     whitelist_text = (
         "\n".join(str(sn) for sn in (selected_activity.late_whitelist_student_numbers or []))
-        if selected_activity
+        if selected_activity and is_admin
         else ""
+    )
+    allowed_reviewer_classes = (
+        None
+        if is_admin
+        else reviewer_allowed_class_names(
+            user, activity_id=selected_activity.id if selected_activity is not None else None
+        )
     )
 
     return {
         "workbench_role": "admin" if is_admin else "reviewer",
         "is_college_admin": is_admin,
+        "reviewer_class_label": "" if is_admin else format_user_class_label(user),
         "activities": activities,
         "selected_activity": selected_activity,
         "activity_id": activity_id,
         "class_filter": class_filter,
+        "category_filter": category_filter,
+        "declaration_type_filter": declaration_type_filter,
         "status_filter": status_filter,
         "late_filter": late_filter,
-        "class_options": workbench_class_options(),
+        "class_options": workbench_class_options(user),
+        "category_options": category_options,
         "status_options": status_options,
         "rows": rows,
         "counts": counts,
@@ -874,7 +1370,7 @@ def _build_review_workbench_context(request):
         "whitelist_text": whitelist_text,
         "whitelist_invalid": whitelist_invalid,
         "late_settings_saved": late_settings_saved,
-        "can_export": bool(selected_activity) and (is_admin or user.role == User.Role.REVIEWER),
+        "can_export": bool(selected_activity) and (is_admin or bool(allowed_reviewer_classes)),
         "export_jobs": list_export_jobs_for_user(user),
         "export_root": f"/api/v1/exports/",
     }

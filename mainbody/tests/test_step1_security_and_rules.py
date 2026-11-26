@@ -22,64 +22,73 @@ from tests.conftest import seed_mandatory_materials
 # =====================================================================
 
 def test_register_student_default_password_last_six_and_extended_fields(db):
-    """未传自定义密码时，默认初始密码为学号后 6 位，must_change_password=True，且支持年级/专业/手机号。"""
+    """未传自定义密码时，默认初始密码为学号后 6 位，must_change_password=True，且支持规范年级/专业/班级/手机号。"""
     user = register_student(
-        student_number="2025080901",
+        student_number="08250901",
         real_name="周同学",
-        class_name="信安25-1班",
-        grade=User.Grade.SOPHOMORE,
+        class_name="01班",
+        grade="2025级",
         major="信息安全",
         phone="13800138000",
     )
-    assert user.username == "2025080901"
-    assert user.grade == "大二"
+    assert user.username == "08250901"
+    assert user.grade == "2025级"
     assert user.major == "信息安全"
+    assert user.class_name == "01班"
     assert user.phone == "13800138000"
     assert user.must_change_password is True
-    assert user.check_password("080901") is True
+    assert user.check_password("250901") is True
 
 
-def test_batch_initialize_students_and_all_grades(db):
-    """验证大一至大四及研究生枚举覆盖，以及后台批量初始化默认密码为学号后 6 位。"""
-    expected_grades = ["大一", "大二", "大三", "大四", "研究生"]
-    assert list(User.Grade.values) == expected_grades
+def test_batch_initialize_students_and_all_majors(db):
+    """验证 6 项固定专业选项，以及后台批量初始化默认密码为学号后 6 位。"""
+    expected_majors = [
+        "计算机类",
+        "人工智能",
+        "计算机科学与技术",
+        "软件工程",
+        "信息安全",
+        "数据科学与大数据技术",
+    ]
+    assert list(User.Major.values) == expected_majors
 
     r1 = StudentRoster.objects.create(
-        student_number="2024123456",
-        real_name="王研",
-        class_name="计科研24-1班",
-        grade=User.Grade.GRADUATE,
+        student_number="08243456",
+        real_name="王同学",
+        class_name="12班",
+        grade="2024级",
         major="计算机科学与技术",
         phone="13900001111",
     )
     created = batch_initialize_students([r1])
     assert len(created) == 1
     u = created[0]
-    assert u.username == "2024123456"
-    assert u.grade == "研究生"
+    assert u.username == "08243456"
+    assert u.grade == "2024级"
     assert u.major == "计算机科学与技术"
+    assert u.class_name == "12班"
     assert u.phone == "13900001111"
     assert u.must_change_password is True
-    assert u.check_password("123456") is True
+    assert u.check_password("243456") is True
 
 
 def test_change_password_api_and_admin_reset_action(client, db):
     """验证修改密码接口将 must_change_password 置为 False，以及 Admin 一键重置密码为学号后 6 位。"""
     user = register_student(
-        student_number="2025112233",
+        student_number="08262233",
         real_name="林同学",
-        class_name="计算机25-1班",
-        grade=User.Grade.FRESHMAN,
-        major="计算机科学与技术",
+        class_name="03班",
+        grade="2026级",
+        major="计算机类",
         phone="13711112222",
     )
     assert user.must_change_password is True
-    assert user.check_password("112233") is True
+    assert user.check_password("262233") is True
 
     client.force_login(user)
     response = client.post(
         "/api/v1/accounts/change-password/",
-        {"old_password": "112233", "new_password": "NewSecure#2026"},
+        {"old_password": "262233", "new_password": "NewSecure#2026"},
         content_type="application/json",
     )
     assert response.status_code == 200
@@ -105,7 +114,7 @@ def test_change_password_api_and_admin_reset_action(client, db):
 
     user.refresh_from_db()
     assert user.must_change_password is True
-    assert user.check_password("112233") is True
+    assert user.check_password("262233") is True
 
 
 # =====================================================================
@@ -232,33 +241,33 @@ def test_duplicate_student_number_across_submissions_in_same_activity_blocked(ac
     seed_mandatory_materials(leader_a, activity)
     submit_for_review(actor=leader_a, submission_id=draft_a.pk)
 
-    # 场景 1：队长 B 试图在另一团队项目中再次拉入队员 C (2025002003) -> 立即抛出 Conflict 并指明冲突学号
+    # 场景 1：不同社会实践团队相互独立，队长 B 可以在另一团队项目中拉入队员 C (2025002003)
     draft_b = create_draft(actor=leader_b, activity_id=activity.pk)
-    with pytest.raises(Conflict, match="2025002003"):
-        save_draft(
-            actor=leader_b,
-            submission_id=draft_b.pk,
-            expected_version=0,
-            data={
-                "project_name": "区块链存证系统",
-                "category": "科技发明制作",
-                "declaration_type": "team",
-                "team_members": [
-                    {
-                        "student_number": "2025002003",
-                        "real_name": "队员C",
-                        "class_name": "计算机二班",
-                    }
-                ],
-            },
-        )
+    draft_b = save_draft(
+        actor=leader_b,
+        submission_id=draft_b.pk,
+        expected_version=0,
+        data={
+            "project_name": "区块链存证系统",
+            "category": "科技发明制作",
+            "declaration_type": "team",
+            "team_members": [
+                {
+                    "student_number": "2025002003",
+                    "real_name": "队员C",
+                    "class_name": "计算机二班",
+                }
+            ],
+        },
+    )
+    assert draft_b.draft_data["team_members"][0]["student_number"] == "2025002003"
 
-    # 场景 2：队长 B 试图把已作为申报人 owner 的队长 A (2025002001) 拉入自己团队 -> 立即拦截并指明 2025002001
+    # 场景 2：同一申报内重复填写同一队员学号仍会被拦截
     with pytest.raises(Conflict, match="2025002001"):
         save_draft(
             actor=leader_b,
             submission_id=draft_b.pk,
-            expected_version=0,
+            expected_version=draft_b.version,
             data={
                 "project_name": "区块链存证系统",
                 "category": "科技发明制作",
@@ -268,43 +277,38 @@ def test_duplicate_student_number_across_submissions_in_same_activity_blocked(ac
                         "student_number": "2025002001",
                         "real_name": "队长A",
                         "class_name": "计算机一班",
-                    }
+                    },
+                    {
+                        "student_number": "2025002001",
+                        "real_name": "队长A",
+                        "class_name": "计算机一班",
+                    },
                 ],
             },
         )
 
-    # 场景 3：已在项目 A 中作为队员的 C (2025002003) 试图自己作为 owner 保存/提交个人项目 -> 立即拦截并指明 2025002003
+    # 场景 3：已在项目 A 中作为队员的 C (2025002003) 可以独立发起并提交自己的个人项目
     draft_c = create_draft(actor=member_c, activity_id=activity.pk)
-    with pytest.raises(Conflict, match="2025002003"):
-        save_draft(
-            actor=member_c,
-            submission_id=draft_c.pk,
-            expected_version=0,
-            data={
-                "project_name": "队员C的个人申报",
-                "category": "学术论文",
-                "declaration_type": "individual",
-                "team_members": [],
-            },
-        )
-
-    # 场景 4：若绕过 save_draft 直接构造冲突草稿并调用 submit_for_review，同样被硬性校验拦截
-    Submission.objects.filter(pk=draft_c.pk).update(
-        draft_data={
-            "project_name": "绕过尝试",
+    draft_c = save_draft(
+        actor=member_c,
+        submission_id=draft_c.pk,
+        expected_version=0,
+        data={
+            "project_name": "队员C的个人申报",
             "category": "学术论文",
             "declaration_type": "individual",
             "team_members": [],
-        }
+        },
     )
-    with pytest.raises(Conflict, match="2025002003"):
-        submit_for_review(actor=member_c, submission_id=draft_c.pk)
+    seed_mandatory_materials(member_c, activity)
+    sub_c, _ = submit_for_review(actor=member_c, submission_id=draft_c.pk)
+    assert sub_c.status == Submission.Status.PENDING_FIRST_REVIEW
 
-    # 场景 5：队长 B 使用无冲突队员正常申报个人或团队项目可通过
+    # 场景 4：队长 B 也可以自由调整自己团队的成员，与项目 A/C 完全独立
     save_draft(
         actor=leader_b,
         submission_id=draft_b.pk,
-        expected_version=0,
+        expected_version=draft_b.version,
         data={
             "project_name": "区块链存证系统",
             "category": "科技发明制作",

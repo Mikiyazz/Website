@@ -19,6 +19,7 @@ def serialize_upload(upload, asset, replaced_ids=()):
     return {
         "id": str(upload.id),
         "upload_id": str(upload.id),
+        "submission_id": str(upload.submission_id) if upload.submission_id else "",
         "file_asset_id": str(asset.id),
         "requirement_id": str(upload.requirement_id),
         "requirement_code": upload.requirement.code,
@@ -53,6 +54,7 @@ def direct_upload_view(request):
     uploaded_file = request.FILES.get("file") or next(iter(request.FILES.values()), None)
     if uploaded_file is None:
         raise DomainError("请上传文件（字段名 file）。")
+    submission_id = request.POST.get("submission_id") or request.GET.get("submission_id")
     replace_upload_id = request.POST.get("replace_upload_id") or request.POST.get("replace_id")
     request_key = request.POST.get("request_key")
 
@@ -60,6 +62,7 @@ def direct_upload_view(request):
         actor=request.user,
         requirement_id=requirement_id,
         file_obj=uploaded_file,
+        submission_id=submission_id,
         replace_upload_id=replace_upload_id,
         request_key=request_key,
     )
@@ -94,6 +97,7 @@ def serialize_chunk_session(upload, *, received=None) -> dict:
     received_chunks = received_chunk_indexes(upload) if received is None else received
     return {
         "upload_id": str(upload.id),
+        "submission_id": str(upload.submission_id) if upload.submission_id else "",
         "chunk_size": int(upload.chunk_size_bytes),
         "total_chunks": int(upload.total_chunks),
         "material_type": upload.requirement.code,
@@ -129,6 +133,7 @@ def chunk_start(request):
         total_chunks=total_chunks,
         requirement_id=data.get("requirement_id") or None,
         activity_id=data.get("activity_id") or None,
+        submission_id=data.get("submission_id") or None,
     )
     payload = serialize_chunk_session(upload)
     payload["resumed"] = resumed

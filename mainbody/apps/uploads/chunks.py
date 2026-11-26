@@ -59,9 +59,11 @@ from .services import (
     ACTIVE_STATES,
     STREAM_CHUNK_BYTES,
     _remove_physical_file,
+    _submission_upload_scope_q,
     assert_extension_count_available,
     ensure_standard_material_requirements,
     resolve_file_disk_path,
+    resolve_upload_submission,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,6 +186,7 @@ def start_chunked_upload(
     total_chunks,
     requirement_id=None,
     activity_id=None,
+    submission_id=None,
 ) -> tuple[UploadSession, bool]:
     """Open (or resume) one chunked upload session.
 
@@ -224,13 +227,24 @@ def start_chunked_upload(
     owner = User.objects.select_for_update().get(pk=actor.pk)
     require_student(owner)
 
-    locked_label = _submission_locked(owner, activity)
-    if locked_label:
-        raise Conflict(f"当前申报状态为【{locked_label}】，不允许上传或替换材料。")
+    target_submission = resolve_upload_submission(
+        owner=owner,
+        activity=activity,
+        submission_id=submission_id,
+    )
+    from apps.submissions.services import ensure_submission_editable_by_student
 
-    # 断点续传：同名同大小的进行中任务直接复用，分片保留在磁盘上。
+    ensure_submission_editable_by_student(target_submission)
+    scope_q = _submission_upload_scope_q(
+        owner_id=owner.pk,
+        activity_id=activity.id,
+        submission=target_submission,
+    )
+
+    # 断点续传：同一申报下同名同大小的进行中任务直接复用，分片保留在磁盘上。
     resumable = (
         UploadSession.objects.filter(
+            scope_q,
             owner=owner,
             requirement=requirement,
             upload_mode=UploadSession.Mode.CHUNKED,
@@ -252,7 +266,7 @@ def start_chunked_upload(
         raise Conflict("同时上传任务过多，请先完成或取消已有任务。")
 
     siblings = list(
-        UploadSession.objects.filter(owner=owner, requirement=requirement).exclude(
+        UploadSession.objects.filter(scope_q, owner=owner, requirement=requirement).exclude(
             status=UploadSession.Status.ABORTED
         )
     )
@@ -281,6 +295,7 @@ def start_chunked_upload(
     upload = UploadSession.objects.create(
         id=upload_id,
         owner=owner,
+        submission=target_submission,
         requirement=requirement,
         quota=quota,
         request_key=uuid.uuid4(),
@@ -319,6 +334,9 @@ def store_chunk(*, actor, upload_id, chunk_index, chunk_file) -> tuple[UploadSes
     require_student(actor)
     # 归属校验在读取任何分片内容之前完成：非本人 upload_id 一律 403。
     upload = _owned_upload(actor, upload_id)
+    from apps.submissions.services import ensure_submission_editable_by_student
+
+    ensure_submission_editable_by_student(upload.submission)
 
     if upload.status == UploadSession.Status.COMPLETE:
         raise Conflict("该上传任务已完成，无需继续上传分片。")
@@ -434,6 +452,9 @@ def complete_chunked_upload(*, actor, upload_id, material_type=None) -> tuple[Up
     """
     require_student(actor)
     upload = _owned_upload(actor, upload_id, lock=True)
+    from apps.submissions.services import ensure_submission_editable_by_student
+
+    ensure_submission_editable_by_student(upload.submission)
 
     requirement = upload.requirement
     if requirement is None:  # pragma: no cover - FK is PROTECT
@@ -507,9 +528,14 @@ def complete_chunked_upload(*, actor, upload_id, material_type=None) -> tuple[Up
         raise
 
     replace_all = requirement.max_count == 1 or requirement.code in SINGLE_FILE_MATERIAL_CODES
+    scope_q = _submission_upload_scope_q(
+        owner_id=upload.owner_id,
+        activity_id=requirement.activity_id,
+        submission=upload.submission,
+    )
     siblings = list(
         UploadSession.objects.select_for_update()
-        .filter(owner=upload.owner, requirement=requirement)
+        .filter(scope_q, owner=upload.owner, requirement=requirement)
         .exclude(pk=upload.pk)
         .exclude(status=UploadSession.Status.ABORTED)
         .order_by("created_at")

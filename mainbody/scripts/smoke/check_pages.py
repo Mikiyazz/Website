@@ -32,8 +32,8 @@ def main():
     dashboard = student.get(BASE + "/", params={"activity_id": activity_id}, timeout=30)
     assert "计算机科普与乡村教育帮扶实践" in dashboard.text, dashboard.text[:300]
     assert "已提交" in dashboard.text
-    assert 'id="must-change-password-banner"' in dashboard.text
-    print("PASS dashboard: submission card + status badge + force-change banner")
+    assert 'id="must-change-password-banner"' not in dashboard.text
+    print("PASS dashboard: submission card + status badge + no force-change banner")
 
     apply_page = student.get(BASE + "/submissions/apply/", params={"activity_id": activity_id}, timeout=30)
     assert apply_page.status_code == 200

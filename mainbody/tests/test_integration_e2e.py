@@ -197,12 +197,12 @@ def test_scenario1_register_login_force_password_change_then_apply(client, activ
     assert user.must_change_password is True
     assert user.role == User.Role.STUDENT
 
-    # 2) 登录后工作台顶部出现首次改密横幅，且链到改密页
+    # 2) 登录后工作台顶部不再出现首次改密横幅，但导航栏仍链到改密页
     dashboard = client.get(DASHBOARD_URL)
     assert dashboard.status_code == 200
     html = dashboard.content.decode("utf-8")
-    assert 'id="must-change-password-banner"' in html
-    assert 'data-must-change-password="true"' in html
+    assert 'id="must-change-password-banner"' not in html
+    assert 'data-must-change-password="true"' not in html
     assert "/accounts/password-change/" in html
 
     # 3) 改密页闭环：旧密码 = 初始密码，改完横幅消失
@@ -322,9 +322,10 @@ def test_scenario2_individual_full_flow_with_300mb_chunked_video(client, activit
     assert submission.revisions.count() == 1
     assert submission.revisions.first().snapshot["project_name"] == "矿区网络安全调研"
 
-    # 提交后申报页只读锁定，工作台显示"已提交"
-    locked_html = client.get(APPLY_URL, {"activity_id": str(activity.pk)}).content.decode("utf-8")
-    assert "只读锁定" in locked_html
+    # 活动开放期内，提交后工作台显示"已提交"，申报页仍支持选中该申报修改并覆盖提交
+    apply_after_html = client.get(APPLY_URL, {"activity_id": str(activity.pk)}).content.decode("utf-8")
+    assert "矿区网络安全调研" in apply_after_html
+    assert 'data-can-submit="true"' in apply_after_html
     dashboard_html = client.get(DASHBOARD_URL, {"activity_id": str(activity.pk)}).content.decode("utf-8")
     assert "已提交" in dashboard_html
 

@@ -11,15 +11,19 @@ import openpyxl
 from django.conf import settings
 from django.utils import timezone
 from apps.accounts.models import User
-from apps.accounts.permissions import is_college_admin
+from apps.accounts.permissions import (
+    is_college_admin,
+    is_reviewer,
+    reviewer_allowed_class_names,
+    reviewer_user_scope_q,
+)
 from apps.activities.models import Activity
 from apps.audit.services import record
 from apps.common.errors import DomainError, Forbidden
-from apps.reviews.models import ReviewAssignment
 from apps.submissions.models import Submission
-from apps.uploads.models import FileAsset, UploadSession
-from apps.uploads.policies import SINGLE_FILE_MATERIAL_CODES, STANDARD_MATERIAL_RULES
-from apps.uploads.services import STREAM_CHUNK_BYTES, resolve_file_disk_path
+from apps.uploads.models import UploadSession
+from apps.uploads.policies import SINGLE_FILE_MATERIAL_CODES, STANDARD_MATERIAL_CODES, STANDARD_MATERIAL_RULES
+from apps.uploads.services import STREAM_CHUNK_BYTES, map_uploads_by_submission, resolve_file_disk_path
 from .models import ExportJob
 
 EXCEL_HEADERS = ["学号", "姓名", "班级", "项目名", "类别", "审核状态"]
@@ -66,15 +70,10 @@ def require_export_permission(actor, activity: Activity, class_name: str | None 
     if is_college_admin(actor):
         return None
 
-    if getattr(actor, "role", None) == User.Role.REVIEWER:
-        assignments = list(
-            ReviewAssignment.objects.filter(reviewer=actor, activity=activity).values_list("class_name", flat=True)
-        )
-        if not assignments:
-            return None
-        if "" in assignments:
-            return None
-        allowed_classes = [c.strip() for c in assignments if c and c.strip()]
+    if is_reviewer(actor):
+        allowed_classes = reviewer_allowed_class_names(actor, activity_id=activity.id)
+        if not allowed_classes:
+            raise Forbidden("当前账号尚未绑定负责班级，无法导出申报材料。")
         if class_name is not None and str(class_name).strip() != "":
             target_cls = str(class_name).strip()
             if target_cls not in allowed_classes:
@@ -111,19 +110,41 @@ def extract_submission_project_info(submission: Submission) -> tuple[str, str]:
     return project_name, category
 
 
-def build_filtered_submissions_queryset(*, actor, activity: Activity, class_name: str | None = None, status: str | None = None):
+def build_filtered_submissions_queryset(
+    *,
+    actor,
+    activity: Activity,
+    class_name: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    declaration_type: str | None = None,
+):
     """Build permission-checked and filtered Submission queryset for an activity."""
+    from apps.reviews.selectors import declaration_type_filter_q
+    from apps.submissions.services import redundant_member_draft_ids
+
     normalized_class = str(class_name).strip() if class_name is not None and str(class_name).strip() else None
+    normalized_category = str(category).strip() if category is not None and str(category).strip() else None
     allowed_classes = require_export_permission(actor, activity, class_name=normalized_class)
     resolved_status = resolve_status_filter(status)
 
     qs = Submission.objects.filter(activity=activity).select_related("owner")
-    if allowed_classes is not None:
+    redundant_ids = redundant_member_draft_ids([activity.id])
+    if redundant_ids:
+        qs = qs.exclude(pk__in=redundant_ids)
+    if not is_college_admin(actor):
+        qs = qs.filter(reviewer_user_scope_q(actor, prefix="owner__", activity_id=activity.id))
+    elif allowed_classes is not None:
         qs = qs.filter(owner__class_name__in=allowed_classes)
     if normalized_class is not None:
         qs = qs.filter(owner__class_name=normalized_class)
     if resolved_status is not None:
         qs = qs.filter(status=resolved_status)
+    if normalized_category is not None:
+        qs = qs.filter(draft_data__category=normalized_category)
+    decl_q = declaration_type_filter_q(declaration_type)
+    if decl_q is not None:
+        qs = qs.filter(decl_q)
 
     return qs.order_by("owner__class_name", "owner__username", "created_at")
 
@@ -135,13 +156,23 @@ def list_activity_declared_classes(*, actor, activity_id) -> list[str]:
     allowed_classes = require_export_permission(actor, activity)
 
     qs = Submission.objects.filter(activity=activity).exclude(owner__class_name="")
-    if allowed_classes is not None:
+    if not is_college_admin(actor):
+        qs = qs.filter(reviewer_user_scope_q(actor, prefix="owner__", activity_id=activity.id))
+    elif allowed_classes is not None:
         qs = qs.filter(owner__class_name__in=allowed_classes)
 
     return list(qs.order_by("owner__class_name").values_list("owner__class_name", flat=True).distinct())
 
 
-def generate_activity_excel_workbook(*, actor, activity_id, class_name: str | None = None, status: str | None = None):
+def generate_activity_excel_workbook(
+    *,
+    actor,
+    activity_id,
+    class_name: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    declaration_type: str | None = None,
+):
     """Generate an openpyxl Workbook with the 6 standard summary columns."""
     act_uuid = _parse_activity_uuid(activity_id)
     activity = Activity.objects.get(pk=act_uuid)
@@ -150,6 +181,8 @@ def generate_activity_excel_workbook(*, actor, activity_id, class_name: str | No
         activity=activity,
         class_name=class_name,
         status=status,
+        category=category,
+        declaration_type=declaration_type,
     )
 
     wb = openpyxl.Workbook()
@@ -175,13 +208,23 @@ def generate_activity_excel_workbook(*, actor, activity_id, class_name: str | No
     return wb, activity
 
 
-def export_activity_excel_stream(*, actor, activity_id, class_name: str | None = None, status: str | None = None):
+def export_activity_excel_stream(
+    *,
+    actor,
+    activity_id,
+    class_name: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    declaration_type: str | None = None,
+):
     """Write the Excel summary workbook to a temporary disk file and return (temp_file, download_filename)."""
     wb, activity = generate_activity_excel_workbook(
         actor=actor,
         activity_id=activity_id,
         class_name=class_name,
         status=status,
+        category=category,
+        declaration_type=declaration_type,
     )
     tmp_file = tempfile.TemporaryFile(suffix=".xlsx")
     wb.save(tmp_file)
@@ -228,7 +271,15 @@ def _build_material_arcname_filename(req_code: str, req_title: str, ext: str, in
     return f"{base_title}_{index}{normalized_ext}"
 
 
-def export_class_zip_stream(*, actor, activity_id, class_name: str, status: str | None = None):
+def export_class_zip_stream(
+    *,
+    actor,
+    activity_id,
+    class_name: str,
+    status: str | None = None,
+    category: str | None = None,
+    declaration_type: str | None = None,
+):
     """Stream all submissions and attachments of a class into a temporary ZIP file on disk."""
     act_uuid = _parse_activity_uuid(activity_id)
     normalized_class = str(class_name or "").strip()
@@ -242,24 +293,12 @@ def export_class_zip_stream(*, actor, activity_id, class_name: str, status: str 
             activity=activity,
             class_name=normalized_class,
             status=status,
+            category=category,
+            declaration_type=declaration_type,
         )
     )
 
-    owner_ids = [sub.owner_id for sub in submissions]
-    uploads_by_owner: dict[int, list[UploadSession]] = {}
-    if owner_ids:
-        valid_uploads = (
-            UploadSession.objects.select_related("requirement", "fileasset")
-            .filter(
-                owner_id__in=owner_ids,
-                requirement__activity=activity,
-                status=UploadSession.Status.COMPLETE,
-                fileasset__status=FileAsset.Status.VALID,
-            )
-            .order_by("created_at", "id")
-        )
-        for up in valid_uploads:
-            uploads_by_owner.setdefault(up.owner_id, []).append(up)
+    uploads_by_submission = map_uploads_by_submission(submissions, activity=activity)
 
     clean_class_dir = sanitize_filename(normalized_class, default="未分班")
     tmp_file = tempfile.TemporaryFile(suffix=".zip")
@@ -274,7 +313,7 @@ def export_class_zip_stream(*, actor, activity_id, class_name: str, status: str 
             clean_project_name = sanitize_filename(raw_project_name, default="未命名项目")
 
             student_folder = f"{clean_student_class}/{clean_name}-{clean_sn}-{clean_project_name}"
-            student_uploads = uploads_by_owner.get(sub.owner_id, [])
+            student_uploads = uploads_by_submission.get(sub.id, [])
 
             grouped: dict[str, list[ tuple[UploadSession, Path] ]] = {}
             for up in student_uploads:
@@ -341,7 +380,7 @@ def export_class_zip_stream(*, actor, activity_id, class_name: str, status: str 
     return tmp_file, download_filename
 
 # =====================================================================
-# 异步导出（Celery）：按学生目录 + 材料类型中文名归档，流式写入 ZIP
+# 异步导出（Celery）：整包单 ZIP，按 年级/班级/姓名+学号/材料文件 分类归档
 # =====================================================================
 
 EXPORT_ROOT_DIRNAME = "exports"
@@ -350,6 +389,31 @@ EXPORT_ROOT_DIRNAME = "exports"
 EXPORT_STORED_THRESHOLD_BYTES = 20 * 1024 * 1024
 EXPORT_PROGRESS_FLUSH_BYTES = 4 * 1024 * 1024
 EXPORT_PROGRESS_FLUSH_SECONDS = 0.5
+
+EXPORT_MODE_DECLARATION_ONLY = "declaration_only"
+EXPORT_MODE_DECLARATION_AND_OUTCOMES = "declaration_and_outcomes"
+DEFAULT_EXPORT_MODE = EXPORT_MODE_DECLARATION_AND_OUTCOMES
+
+EXPORT_MODE_CHOICES = (
+    (EXPORT_MODE_DECLARATION_ONLY, "导出申报表"),
+    (EXPORT_MODE_DECLARATION_AND_OUTCOMES, "导出申报表和成果"),
+)
+EXPORT_MODE_LABELS = dict(EXPORT_MODE_CHOICES)
+EXPORT_MODE_ARCHIVE_SUFFIX = {
+    EXPORT_MODE_DECLARATION_ONLY: "申报表归档",
+    EXPORT_MODE_DECLARATION_AND_OUTCOMES: "申报表和成果归档",
+}
+DECLARATION_MATERIAL_CODE = "application_form"
+
+
+def normalize_export_mode(raw) -> str:
+    """规范化导出模式；留空回退默认模式，非法值抛出 DomainError。"""
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_EXPORT_MODE
+    mode = str(raw).strip()
+    if mode not in EXPORT_MODE_LABELS:
+        raise DomainError("无效的导出模式，请选择「导出申报表」或「导出申报表和成果」。")
+    return mode
 
 
 def export_relative_dir(activity_id) -> str:
@@ -368,45 +432,80 @@ def _material_title(code: str, fallback: str) -> str:
     return sanitize_filename(raw, default="附件")
 
 
-def _student_dir_name(submission: Submission) -> str:
-    student_number = sanitize_filename(submission.owner.username, default="未知学号")
+def _resolve_grade_dir(owner) -> str:
+    return sanitize_filename(getattr(owner, "grade", ""), default="未填年级")
+
+
+def _resolve_class_dir(owner) -> str:
+    from apps.accounts.models import CLASS_NAME_RE
+
+    raw_class = str(getattr(owner, "class_name", "") or "").strip()
+    raw_major = str(getattr(owner, "major", "") or "").strip()
+    if raw_class:
+        if raw_major and CLASS_NAME_RE.match(raw_class):
+            return sanitize_filename(f"{raw_major}{raw_class}", default="未分班")
+        return sanitize_filename(raw_class, default="未分班")
+    if raw_major:
+        return sanitize_filename(raw_major, default="未分班")
+    return "未分班"
+
+
+def _student_dir_name(submission: Submission, *, multi_for_owner: bool = False) -> str:
+    grade_dir = _resolve_grade_dir(submission.owner)
+    class_dir = _resolve_class_dir(submission.owner)
     real_name = sanitize_filename(submission.owner.real_name or submission.owner.username, default="未知姓名")
-    return f"{student_number}_{real_name}"
+    student_number = sanitize_filename(submission.owner.username, default="未知学号")
+    student_leaf = f"{real_name}+{student_number}"
+    if multi_for_owner:
+        raw_project_name, _ = extract_submission_project_info(submission)
+        clean_project = sanitize_filename(raw_project_name, default=str(submission.id)[:8])
+        student_leaf = f"{student_leaf}-{clean_project}"
+    return f"{grade_dir}/{class_dir}/{student_leaf}"
 
 
-def build_export_entries(*, activity: Activity, allowed_classes=None) -> list[dict]:
+def _has_submitted_declaration(submission: Submission) -> bool:
+    """判定是否已提交立项申报（含兼容已进入审核流转的历史记录）。"""
+    return bool(submission.declaration_submitted) or submission.status != Submission.Status.DRAFT
+
+
+def _has_submitted_outcomes(submission: Submission) -> bool:
+    """判定是否已提交成果审核（草稿状态均视为未提交成果）。"""
+    return submission.status != Submission.Status.DRAFT
+
+
+def _ordered_requirement_codes(grouped: dict[str, list]) -> list[str]:
+    standard_order = {code: idx for idx, code in enumerate(STANDARD_MATERIAL_CODES)}
+    return sorted(grouped.keys(), key=lambda code: (standard_order.get(code, 999), code))
+
+
+def build_export_entries(*, activity: Activity, allowed_classes=None, mode: str | None = None, actor=None) -> list[dict]:
     """Collect (source file, archive name, size) tuples for one activity without touching bytes."""
-    submissions = list(
+    from apps.submissions.services import redundant_member_draft_ids
+
+    resolved_mode = normalize_export_mode(mode)
+    qs = (
         Submission.objects.filter(activity=activity)
         .select_related("owner")
-        .order_by("owner__class_name", "owner__username", "created_at")
+        .order_by("owner__grade", "owner__class_name", "owner__username", "created_at")
     )
-    if allowed_classes:
+    redundant_ids = redundant_member_draft_ids([activity.id])
+    if redundant_ids:
+        qs = qs.exclude(pk__in=redundant_ids)
+    if actor is not None and not is_college_admin(actor):
+        qs = qs.filter(reviewer_user_scope_q(actor, prefix="owner__", activity_id=activity.id))
+
+    submissions = list(qs)
+    if allowed_classes is not None:
         allowed = {str(item).strip() for item in allowed_classes if str(item).strip()}
         submissions = [sub for sub in submissions if str(sub.owner.class_name or "").strip() in allowed]
 
-    owner_ids = [sub.owner_id for sub in submissions]
-    uploads_by_owner: dict[int, list[UploadSession]] = {}
-    if owner_ids:
-        uploads = (
-            UploadSession.objects.select_related("requirement", "fileasset")
-            .filter(
-                owner_id__in=owner_ids,
-                requirement__activity=activity,
-                status=UploadSession.Status.COMPLETE,
-                fileasset__status=FileAsset.Status.VALID,
-            )
-            .order_by("created_at", "id")
-        )
-        for upload in uploads:
-            uploads_by_owner.setdefault(upload.owner_id, []).append(upload)
+    uploads_by_submission = map_uploads_by_submission(submissions, activity=activity)
 
-    entries: list[dict] = []
-    used_arcnames: set[str] = set()
+    # 先按导出模式严格筛选符合提交状态且存在有效磁盘文件的申报及附件集合
+    selected_records: list[tuple[Submission, list[tuple[UploadSession, Path, int]]]] = []
     for submission in submissions:
-        student_dir = _student_dir_name(submission)
-        prefix = "late_" if submission.is_late_submission else ""
-        for upload in uploads_by_owner.get(submission.owner_id, []):
+        valid_items: list[tuple[UploadSession, Path, int]] = []
+        for upload in uploads_by_submission.get(submission.id, []):
             try:
                 source_path = resolve_file_disk_path(upload.object_key)
             except DomainError:
@@ -417,29 +516,71 @@ def build_export_entries(*, activity: Activity, allowed_classes=None) -> list[di
                 size = source_path.stat().st_size
             except OSError:
                 continue
+            valid_items.append((upload, source_path, size))
 
-            category = _material_title(upload.requirement.code, upload.requirement.title)
-            stem = sanitize_filename(Path(upload.original_name).stem, default="附件")
-            extension = Path(upload.original_name).suffix.lower() or source_path.suffix.lower()
-            filename = sanitize_filename(f"{prefix}{stem}{extension}", default="附件")
+        decl_items = [item for item in valid_items if item[0].requirement.code == DECLARATION_MATERIAL_CODE]
+        outcome_items = [item for item in valid_items if item[0].requirement.code != DECLARATION_MATERIAL_CODE]
 
-            arcname = f"{student_dir}/{category}/{filename}"
-            if arcname in used_arcnames:
-                suffix = 2
-                while f"{student_dir}/{category}/{prefix}{stem}_{suffix}{extension}" in used_arcnames:
-                    suffix += 1
-                filename = sanitize_filename(f"{prefix}{stem}_{suffix}{extension}", default="附件")
-                arcname = f"{student_dir}/{category}/{filename}"
-            used_arcnames.add(arcname)
-            entries.append(
-                {
-                    "arcname": arcname,
-                    "source_path": source_path,
-                    "size": size,
-                    "submission_id": str(submission.id),
-                    "is_late": submission.is_late_submission,
-                }
-            )
+        if resolved_mode == EXPORT_MODE_DECLARATION_ONLY:
+            if not _has_submitted_declaration(submission) or not decl_items:
+                continue
+            chosen_items = decl_items
+        else:
+            if not _has_submitted_outcomes(submission) or not outcome_items:
+                continue
+            chosen_items = decl_items + outcome_items
+
+        selected_records.append((submission, chosen_items))
+
+    owner_sub_counts: dict[int, int] = {}
+    for submission, _ in selected_records:
+        owner_sub_counts[submission.owner_id] = owner_sub_counts.get(submission.owner_id, 0) + 1
+
+    entries: list[dict] = []
+    used_arcnames: set[str] = set()
+    for submission, chosen_items in selected_records:
+        student_dir = _student_dir_name(
+            submission,
+            multi_for_owner=owner_sub_counts.get(submission.owner_id, 0) > 1,
+        )
+        prefix = "late_" if submission.is_late_submission else ""
+
+        grouped: dict[str, list[tuple[UploadSession, Path, int]]] = {}
+        for item in chosen_items:
+            grouped.setdefault(item[0].requirement.code, []).append(item)
+
+        for req_code in _ordered_requirement_codes(grouped):
+            items = grouped[req_code]
+            total = len(items)
+            for idx, (upload, source_path, size) in enumerate(items, start=1):
+                ext = Path(upload.original_name).suffix.lower() or source_path.suffix.lower()
+                file_label = _build_material_arcname_filename(
+                    req_code=req_code,
+                    req_title=upload.requirement.title,
+                    ext=ext,
+                    index=idx,
+                    total_in_category=total,
+                    max_count=upload.requirement.max_count,
+                )
+                filename = sanitize_filename(f"{prefix}{file_label}", default="附件")
+                arcname = f"{student_dir}/{filename}"
+                if arcname in used_arcnames:
+                    stem = Path(filename).stem
+                    suffix_ext = Path(filename).suffix
+                    dedup = 2
+                    while f"{student_dir}/{stem}_{dedup}{suffix_ext}" in used_arcnames:
+                        dedup += 1
+                    arcname = f"{student_dir}/{stem}_{dedup}{suffix_ext}"
+                used_arcnames.add(arcname)
+                entries.append(
+                    {
+                        "arcname": arcname,
+                        "source_path": source_path,
+                        "size": size,
+                        "submission_id": str(submission.id),
+                        "is_late": submission.is_late_submission,
+                    }
+                )
 
     entries.sort(key=lambda item: item["arcname"])
     return entries
@@ -491,19 +632,23 @@ def _write_zip_entry(zf: zipfile.ZipFile, entry: dict, progress: _ExportProgress
             progress.add(len(chunk))
 
 
-def create_activity_export_job(*, actor, activity_id) -> ExportJob:
+def create_activity_export_job(*, actor, activity_id, mode: str | None = None) -> ExportJob:
     """Create a pending ExportJob after permission checks; celery task owns the heavy lifting."""
     try:
         activity = Activity.objects.get(pk=_parse_activity_uuid(activity_id))
     except Activity.DoesNotExist:
         raise DomainError("导出失败：活动不存在或已被删除。") from None
     allowed_classes = require_export_permission(actor, activity)
+    resolved_mode = normalize_export_mode(mode)
+    mode_label = EXPORT_MODE_LABELS[resolved_mode]
     job = ExportJob.objects.create(
         requested_by=actor,
         activity=activity,
         status=ExportJob.Status.PENDING,
         filters={
             "type": "activity_zip",
+            "mode": resolved_mode,
+            "mode_label": mode_label,
             "classes": list(allowed_classes or []),
             "scope": "activity",
         },
@@ -512,7 +657,12 @@ def create_activity_export_job(*, actor, activity_id) -> ExportJob:
         actor=actor,
         action="export.activity.started",
         target=job,
-        metadata={"activity_id": str(activity.id), "job_id": str(job.id), "classes": list(allowed_classes or [])},
+        metadata={
+            "activity_id": str(activity.id),
+            "job_id": str(job.id),
+            "mode": resolved_mode,
+            "classes": list(allowed_classes or []),
+        },
     )
     return job
 
@@ -527,14 +677,32 @@ def run_activity_export_job(job_id) -> ExportJob:
     )
 
     try:
-        filters = job.filters or {}
-        allowed_classes = filters.get("classes") or None
-        entries = build_export_entries(activity=activity, allowed_classes=allowed_classes)
+        filters = dict(job.filters or {})
+        raw_classes = filters.get("classes")
+        if is_college_admin(job.requested_by):
+            allowed_classes = raw_classes if raw_classes else None
+        else:
+            allowed_classes = list(raw_classes) if raw_classes is not None else []
+        resolved_mode = normalize_export_mode(filters.get("mode"))
+        mode_label = EXPORT_MODE_LABELS[resolved_mode]
+        entries = build_export_entries(
+            activity=activity,
+            allowed_classes=allowed_classes,
+            mode=resolved_mode,
+            actor=job.requested_by,
+        )
         total_bytes = sum(int(entry["size"]) for entry in entries)
+        submission_count = len({entry["submission_id"] for entry in entries})
         ExportJob.objects.filter(pk=job.pk).update(
             total=total_bytes,
             current=0,
-            filters={**filters, "file_count": len(entries)},
+            filters={
+                **filters,
+                "mode": resolved_mode,
+                "mode_label": mode_label,
+                "file_count": len(entries),
+                "submission_count": submission_count,
+            },
             updated_at=timezone.now(),
         )
 
@@ -550,11 +718,12 @@ def run_activity_export_job(job_id) -> ExportJob:
         progress.flush()
 
         download_name = sanitize_filename(activity.title, default="活动")
+        archive_suffix = EXPORT_MODE_ARCHIVE_SUFFIX.get(resolved_mode, "归档材料")
         finished = timezone.now()
         ExportJob.objects.filter(pk=job.pk).update(
             status=ExportJob.Status.DONE,
             file_path=relative_path,
-            result_key=f"{download_name}-全院归档材料.zip",
+            result_key=f"{download_name}-{archive_suffix}.zip",
             current=total_bytes,
             total=total_bytes,
             finished_at=finished,
@@ -567,6 +736,8 @@ def run_activity_export_job(job_id) -> ExportJob:
             target=job,
             metadata={
                 "activity_id": str(activity.id),
+                "mode": resolved_mode,
+                "submission_count": submission_count,
                 "file_count": len(entries),
                 "total_bytes": total_bytes,
                 "file_path": relative_path,
@@ -592,16 +763,20 @@ def run_activity_export_job(job_id) -> ExportJob:
 
 
 def serialize_export_job(job: ExportJob) -> dict:
+    filters = job.filters or {}
     return {
         "job_id": str(job.id),
         "activity_id": str(job.activity_id),
         "activity_title": job.activity.title if job.activity_id else "",
+        "mode": job.export_mode,
+        "mode_label": job.export_mode_label,
         "status": job.status,
         "status_display": job.get_status_display(),
         "total": job.total,
         "current": job.current,
         "percent": job.percent,
-        "file_count": int((job.filters or {}).get("file_count") or 0),
+        "submission_count": int(filters.get("submission_count") or 0),
+        "file_count": int(filters.get("file_count") or 0),
         "file_path": job.file_path,
         "error_code": job.error_code,
         "result_key": job.result_key,

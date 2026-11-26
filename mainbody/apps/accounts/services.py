@@ -2,7 +2,16 @@
 from django.db import transaction
 from apps.audit.services import record
 from apps.common.errors import Conflict, DomainError, Forbidden
-from .models import StudentRoster, User, default_password_from_student_number
+from .models import (
+    CLASS_NAME_RE,
+    GRADE_RE,
+    MAJOR_CHOICES,
+    PHONE_RE,
+    STUDENT_NUMBER_RE,
+    StudentRoster,
+    User,
+    default_password_from_student_number,
+)
 
 
 def get_default_password(student_number: str) -> str:
@@ -10,6 +19,53 @@ def get_default_password(student_number: str) -> str:
     if len(student_number) < 6:
         raise DomainError("学号长度至少为 6 位。")
     return default_password_from_student_number(student_number)
+
+
+def validate_student_registration_fields(
+    *,
+    student_number: str,
+    real_name: str,
+    grade: str,
+    major: str,
+    class_name: str,
+    phone: str,
+    password=None,
+) -> dict[str, str]:
+    """逐字段校验学生注册信息，返回 {field_name: error_message}。"""
+    errors: dict[str, str] = {}
+
+    if not student_number:
+        errors["student_number"] = "请输入学号。"
+    elif not STUDENT_NUMBER_RE.match(student_number):
+        errors["student_number"] = "学号必须为 8 位数字。"
+
+    if not real_name:
+        errors["real_name"] = "请输入姓名。"
+
+    if not grade:
+        errors["grade"] = "请输入年级。"
+    elif not GRADE_RE.match(grade):
+        errors["grade"] = "年级格式须为 202X级（如 2025级）。"
+
+    if not major:
+        errors["major"] = "请选择专业。"
+    elif major not in MAJOR_CHOICES:
+        errors["major"] = "请从可选专业列表中选择，不支持自定义专业。"
+
+    if not class_name:
+        errors["class_name"] = "请输入班级。"
+    elif not CLASS_NAME_RE.match(class_name):
+        errors["class_name"] = "班级格式须为 XX班，个位数须补零（如 01班、12班）。"
+
+    if not phone:
+        errors["phone"] = "请输入手机号。"
+    elif not PHONE_RE.match(phone):
+        errors["phone"] = "手机号必须为 11 位数字。"
+
+    if password is not None and str(password) != "" and len(str(password)) < 6:
+        errors["password"] = "自定义密码长度至少为 6 位。"
+
+    return errors
 
 
 @transaction.atomic
@@ -30,33 +86,42 @@ def register_student(
     major = str(major or "").strip()
     phone = str(phone or "").strip()
 
-    if not student_number:
-        raise DomainError("学号不能为空。")
-    if not real_name:
-        raise DomainError("姓名不能为空。")
-    if not class_name:
-        raise DomainError("班级不能为空。")
+    roster = (
+        StudentRoster.objects.filter(student_number=student_number, user__isnull=True).first()
+        if student_number
+        else None
+    )
+    if roster:
+        grade = grade or roster.grade
+        major = major or roster.major
+        phone = phone or roster.phone
 
-    if grade and grade not in User.Grade.values:
-        raise DomainError("年级取值无效，必须为大一至大四或研究生。")
+    field_errors = validate_student_registration_fields(
+        student_number=student_number,
+        real_name=real_name,
+        grade=grade,
+        major=major,
+        class_name=class_name,
+        phone=phone,
+        password=password,
+    )
+    if field_errors:
+        first_message = next(iter(field_errors.values()))
+        err = DomainError(first_message)
+        err.field_errors = field_errors
+        raise err
 
     # 若未显式传入自定义密码，默认初始密码设为学号后 6 位
     if password is None or str(password) == "":
         raw_password = get_default_password(student_number)
     else:
         raw_password = str(password)
-        if len(raw_password) < 6:
-            raise DomainError("密码长度至少为 6 位。")
 
     # 学号查重：username 保存学号字符串，保留可能的前导零
     if User.objects.filter(username=student_number).exists():
-        raise Conflict("该学号已被注册。")
-
-    roster = StudentRoster.objects.filter(student_number=student_number, user__isnull=True).first()
-    if roster:
-        grade = grade or roster.grade
-        major = major or roster.major
-        phone = phone or roster.phone
+        err = Conflict("该学号已被注册。")
+        err.field_errors = {"student_number": "该学号已被注册。"}
+        raise err
 
     # 后端强制写死角色为普通学生 (student)，严禁从外部读取权限参数；首次登录必须修改密码
     user = User.objects.create_user(

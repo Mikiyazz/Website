@@ -14,6 +14,7 @@ class ActivityAdmin(admin.ModelAdmin):
         "opens_at",
         "deadline",
         "allowed_classes",
+        "project_categories",
         "late_whitelist_student_numbers",
         "quota_bytes_per_student",
     )

@@ -1,73 +1,260 @@
 {% extends "base.html" %}
 {% block title %}学生自主注册 · 学院社会实践材料平台{% endblock %}
 {% block content %}
-<div class="card card-md" style="max-width: 600px; margin: 0 auto;">
-  <div class="card-body">
-    <div class="text-uppercase text-secondary fs-5 fw-bold mb-1">学院社会实践 · 学生账号开通</div>
-    <h1 class="h2 mb-2">学生自主注册</h1>
-    <p class="text-secondary mb-3">请准确填写本人学籍信息完成注册。注册后角色固定为学生账号。</p>
+<div class="card auth-card mx-auto" style="max-width: 600px;">
+  <div class="card-body p-4 p-sm-5">
+    <div class="hero-greeting-eyebrow">学院社会实践 · 学生账号开通</div>
+    <h1 class="mb-2" style="font-size: 1.75rem; font-weight: 500; letter-spacing: -0.02em;">学生自主注册</h1>
+    <p class="text-secondary small mb-4">请准确填写本人学籍信息完成注册。注册后角色固定为学生账号。</p>
 
-    <div class="alert alert-info mb-3 hint-box" role="alert">
+    <div class="alert mb-4 hint-box" role="alert">
       <strong>默认初始密码规则说明：</strong>
-      若下方密码栏留空，系统将自动以您的<strong>学号后 6 位</strong>作为初始登录密码；若您自行填写密码，长度须不少于 6 位。首次登录后系统将在顶部提醒您完成首次改密。
+      若下方密码栏留空，系统将自动以您的<strong>学号后 6 位</strong>作为初始登录密码；若您自行填写密码，长度须不少于 6 位。登录后可随时通过页面右上角修改登录密码。
     </div>
 
     {% if error_message %}
     <div class="alert alert-important alert-danger alert-error mb-3" id="register-error" role="alert">{{ error_message }}</div>
     {% endif %}
 
-    <form method="post" action="{% url 'register-page' %}" id="regForm">
+    <form method="post" action="{% url 'register-page' %}" id="regForm" novalidate>
       {% csrf_token %}
-      <div class="row g-2 mb-3">
+      <div class="row g-3 mb-2">
         <div class="col-sm-6 form-row">
-          <label class="form-label required" for="reg_student_number">学号 <span style="color:#c92a2a;">*</span></label>
-          <input type="text" class="form-control" name="student_number" id="reg_student_number" required minlength="6" placeholder="例如：2025080901" value="{{ form_data.student_number|default:'' }}">
+          <label class="form-label required" for="reg_student_number">学号</label>
+          <input type="text"
+                 class="form-control {% if field_errors.student_number %}is-invalid{% endif %}"
+                 name="student_number"
+                 id="reg_student_number"
+                 required
+                 maxlength="8"
+                 inputmode="numeric"
+                 autocomplete="username"
+                 placeholder="例如：08250757"
+                 value="{{ form_data.student_number|default:'' }}">
+          <div class="invalid-feedback" id="err_student_number">{{ field_errors.student_number|default:'' }}</div>
         </div>
         <div class="col-sm-6 form-row">
-          <label class="form-label required" for="reg_real_name">姓名 <span style="color:#c92a2a;">*</span></label>
-          <input type="text" class="form-control" name="real_name" id="reg_real_name" required placeholder="请输入真实姓名" value="{{ form_data.real_name|default:'' }}">
+          <label class="form-label required" for="reg_real_name">姓名</label>
+          <input type="text"
+                 class="form-control {% if field_errors.real_name %}is-invalid{% endif %}"
+                 name="real_name"
+                 id="reg_real_name"
+                 required
+                 placeholder="请输入真实姓名"
+                 value="{{ form_data.real_name|default:'' }}">
+          <div class="invalid-feedback" id="err_real_name">{{ field_errors.real_name|default:'' }}</div>
         </div>
       </div>
 
-      <div class="row g-2 mb-3">
+      <div class="row g-3 mb-2">
         <div class="col-sm-6 form-row">
-          <label class="form-label required" for="reg_grade">年级 <span style="color:#c92a2a;">*</span></label>
-          <select class="form-select" name="grade" id="reg_grade" required>
-            <option value="">-- 请选择年级 --</option>
-            <option value="大一" {% if form_data.grade == '大一' %}selected{% endif %}>大一</option>
-            <option value="大二" {% if form_data.grade == '大二' %}selected{% endif %}>大二</option>
-            <option value="大三" {% if form_data.grade == '大三' %}selected{% endif %}>大三</option>
-            <option value="大四" {% if form_data.grade == '大四' %}selected{% endif %}>大四</option>
-            <option value="研究生" {% if form_data.grade == '研究生' %}selected{% endif %}>研究生</option>
+          <label class="form-label required" for="reg_grade">年级</label>
+          <input type="text"
+                 class="form-control {% if field_errors.grade %}is-invalid{% endif %}"
+                 name="grade"
+                 id="reg_grade"
+                 required
+                 maxlength="5"
+                 placeholder="例如：2025级"
+                 value="{{ form_data.grade|default:'' }}">
+          <div class="invalid-feedback" id="err_grade">{{ field_errors.grade|default:'' }}</div>
+        </div>
+        <div class="col-sm-6 form-row">
+          <label class="form-label required" for="reg_major">专业</label>
+          <select class="form-select {% if field_errors.major %}is-invalid{% endif %}" name="major" id="reg_major" required>
+            <option value="">-- 请选择专业 --</option>
+            {% for opt in major_choices %}
+            <option value="{{ opt }}" {% if form_data.major == opt %}selected{% endif %}>{{ opt }}</option>
+            {% endfor %}
           </select>
-        </div>
-        <div class="col-sm-6 form-row">
-          <label class="form-label required" for="reg_major">专业 <span style="color:#c92a2a;">*</span></label>
-          <input type="text" class="form-control" name="major" id="reg_major" required placeholder="例如：信息安全 / 计算机科学与技术" value="{{ form_data.major|default:'' }}">
+          <div class="invalid-feedback" id="err_major">{{ field_errors.major|default:'' }}</div>
         </div>
       </div>
 
-      <div class="row g-2 mb-3">
+      <div class="row g-3 mb-2">
         <div class="col-sm-6 form-row">
-          <label class="form-label required" for="reg_class_name">班级 <span style="color:#c92a2a;">*</span></label>
-          <input type="text" class="form-control" name="class_name" id="reg_class_name" required placeholder="例如：信安25-1班" value="{{ form_data.class_name|default:'' }}">
+          <label class="form-label required" for="reg_class_name">班级</label>
+          <input type="text"
+                 class="form-control {% if field_errors.class_name %}is-invalid{% endif %}"
+                 name="class_name"
+                 id="reg_class_name"
+                 required
+                 maxlength="3"
+                 placeholder="例如：01班"
+                 value="{{ form_data.class_name|default:'' }}">
+          <div class="invalid-feedback" id="err_class_name">{{ field_errors.class_name|default:'' }}</div>
         </div>
         <div class="col-sm-6 form-row">
-          <label class="form-label required" for="reg_phone">手机号 <span style="color:#c92a2a;">*</span></label>
-          <input type="tel" class="form-control" name="phone" id="reg_phone" required placeholder="请输入11位常用手机号" value="{{ form_data.phone|default:'' }}">
+          <label class="form-label required" for="reg_phone">手机号</label>
+          <input type="tel"
+                 class="form-control {% if field_errors.phone %}is-invalid{% endif %}"
+                 name="phone"
+                 id="reg_phone"
+                 required
+                 maxlength="11"
+                 inputmode="numeric"
+                 placeholder="请输入11位手机号"
+                 value="{{ form_data.phone|default:'' }}">
+          <div class="invalid-feedback" id="err_phone">{{ field_errors.phone|default:'' }}</div>
         </div>
       </div>
 
       <div class="mb-3 form-row">
         <label class="form-label" for="reg_password">登录密码（选填，留空则默认设为学号后 6 位）</label>
-        <input type="password" class="form-control" name="password" id="reg_password" autocomplete="new-password" placeholder="留空默认使用学号后6位；自定义密码需至少6位">
+        <input type="password"
+               class="form-control {% if field_errors.password %}is-invalid{% endif %}"
+               name="password"
+               id="reg_password"
+               autocomplete="new-password"
+               placeholder="留空默认学号后6位，自定义至少6位">
+        <div class="invalid-feedback" id="err_password">{{ field_errors.password|default:'' }}</div>
       </div>
 
-      <div class="form-footer d-flex gap-2 mt-4">
-        <button type="submit" class="btn btn-primary flex-fill" style="flex:1;">立即注册并登录</button>
-        <a class="btn btn-outline-secondary quiet" href="{% url 'login' %}">返回登录页</a>
+      <div class="form-footer d-flex flex-wrap gap-2 mt-4">
+        <button type="submit" class="btn btn-primary flex-fill py-2">立即注册并登录</button>
+        <a class="btn btn-outline-secondary quiet py-2" href="{% url 'login' %}">返回登录页</a>
       </div>
     </form>
   </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  "use strict";
+
+  var form = document.getElementById("regForm");
+  if (!form) { return; }
+
+  var ALLOWED_MAJORS = [
+    "计算机类",
+    "人工智能",
+    "计算机科学与技术",
+    "软件工程",
+    "信息安全",
+    "数据科学与大数据技术"
+  ];
+
+  var fields = {
+    student_number: {
+      input: document.getElementById("reg_student_number"),
+      err: document.getElementById("err_student_number"),
+      validate: function (val) {
+        var v = val.trim();
+        if (!v) { return "请输入学号。"; }
+        if (!/^\d{8}$/.test(v)) { return "学号必须为 8 位数字。"; }
+        return "";
+      }
+    },
+    real_name: {
+      input: document.getElementById("reg_real_name"),
+      err: document.getElementById("err_real_name"),
+      validate: function (val) {
+        if (!val.trim()) { return "请输入姓名。"; }
+        return "";
+      }
+    },
+    grade: {
+      input: document.getElementById("reg_grade"),
+      err: document.getElementById("err_grade"),
+      validate: function (val) {
+        var v = val.trim();
+        if (!v) { return "请输入年级。"; }
+        if (!/^202\d级$/.test(v)) { return "年级格式须为 202X级（如 2025级）。"; }
+        return "";
+      }
+    },
+    major: {
+      input: document.getElementById("reg_major"),
+      err: document.getElementById("err_major"),
+      validate: function (val) {
+        var v = val.trim();
+        if (!v) { return "请选择专业。"; }
+        if (ALLOWED_MAJORS.indexOf(v) === -1) { return "请从可选专业列表中选择。"; }
+        return "";
+      }
+    },
+    class_name: {
+      input: document.getElementById("reg_class_name"),
+      err: document.getElementById("err_class_name"),
+      validate: function (val) {
+        var v = val.trim();
+        if (!v) { return "请输入班级。"; }
+        if (!/^(?:0[1-9]|[1-9]\d)班$/.test(v)) { return "班级格式须为 XX班，个位数须补零（如 01班、12班）。"; }
+        return "";
+      }
+    },
+    phone: {
+      input: document.getElementById("reg_phone"),
+      err: document.getElementById("err_phone"),
+      validate: function (val) {
+        var v = val.trim();
+        if (!v) { return "请输入手机号。"; }
+        if (!/^\d{11}$/.test(v)) { return "手机号必须为 11 位数字。"; }
+        return "";
+      }
+    },
+    password: {
+      input: document.getElementById("reg_password"),
+      err: document.getElementById("err_password"),
+      validate: function (val) {
+        if (val !== "" && val.length < 6) { return "自定义密码长度至少为 6 位。"; }
+        return "";
+      }
+    }
+  };
+
+  function renderFieldState(name, message) {
+    var item = fields[name];
+    if (!item || !item.input || !item.err) { return true; }
+    if (message) {
+      item.input.classList.add("is-invalid");
+      item.input.setAttribute("aria-invalid", "true");
+      item.err.textContent = message;
+      item.err.style.display = "block";
+      return false;
+    }
+    item.input.classList.remove("is-invalid");
+    item.input.removeAttribute("aria-invalid");
+    item.err.textContent = "";
+    item.err.style.display = "";
+    return true;
+  }
+
+  function validateOne(name) {
+    var item = fields[name];
+    if (!item || !item.input) { return true; }
+    return renderFieldState(name, item.validate(item.input.value || ""));
+  }
+
+  Object.keys(fields).forEach(function (name) {
+    var item = fields[name];
+    if (!item.input) { return; }
+    var evtName = item.input.tagName === "SELECT" ? "change" : "input";
+    item.input.addEventListener(evtName, function () {
+      validateOne(name);
+    });
+    item.input.addEventListener("blur", function () {
+      if (item.input.value !== "" || name !== "password") {
+        validateOne(name);
+      }
+    });
+  });
+
+  form.addEventListener("submit", function (evt) {
+    var firstInvalid = null;
+    Object.keys(fields).forEach(function (name) {
+      var ok = validateOne(name);
+      if (!ok && !firstInvalid && fields[name].input) {
+        firstInvalid = fields[name].input;
+      }
+    });
+    if (firstInvalid) {
+      evt.preventDefault();
+      firstInvalid.focus();
+    }
+  });
+})();
+</script>
 {% endblock %}

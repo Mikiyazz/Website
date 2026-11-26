@@ -33,6 +33,13 @@ class UploadSession(BaseModel):
         CHUNKED = "chunked", "浏览器分片上传"
 
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    submission = models.ForeignKey(
+        "submissions.Submission",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="uploads",
+    )
     requirement = models.ForeignKey("activities.MaterialRequirement", on_delete=models.PROTECT)
     quota = models.ForeignKey(StorageQuota, on_delete=models.PROTECT)
     request_key = models.UUIDField(default=uuid.uuid4)
@@ -58,7 +65,11 @@ class UploadSession(BaseModel):
             models.UniqueConstraint(fields=["owner", "request_key"], name="unique_owner_upload_request"),
             models.CheckConstraint(condition=Q(declared_bytes__gt=0) & Q(declared_bytes__lte=10_000_000_000), name="upload_ten_gb_ceiling"),
         ]
-        indexes = [models.Index(fields=["owner", "status"]), models.Index(fields=["status", "expires_at"])]
+        indexes = [
+            models.Index(fields=["owner", "status"]),
+            models.Index(fields=["submission", "status"]),
+            models.Index(fields=["status", "expires_at"]),
+        ]
 
 
 class FileAsset(BaseModel):

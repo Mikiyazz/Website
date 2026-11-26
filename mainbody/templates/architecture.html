@@ -1,16 +1,14 @@
 {% extends "base.html" %}
 {% block title %}开发模块总览{% endblock %}
 {% block content %}
-<div class="page-header mb-3">
-  <div class="row align-items-center g-2">
-    <div class="col">
-      <div class="page-pretitle">开发环境 · 框架 0.1</div>
-      <h2 class="page-title">项目模块总览</h2>
-    </div>
+<section class="hero-editorial">
+  <div>
+    <div class="hero-greeting-eyebrow">开发环境 · 框架 0.1</div>
+    <h1 class="hero-greeting-title">项目模块总览</h1>
+    <p class="hero-greeting-sub">页面与接口 → 业务服务 → PostgreSQL / 后台任务 / 对象存储接口</p>
   </div>
-</div>
-<p class="text-secondary mb-4">页面与接口 → 业务服务 → PostgreSQL / 后台任务 / 对象存储接口</p>
-<div class="row row-cards g-3">
+</section>
+<div class="row g-4">
   <div class="col-12 col-md-6">
     <div class="card card-pad h-100">
       <h3 class="card-title">账号与活动</h3>
@@ -40,7 +38,7 @@
     </div>
   </div>
 </div>
-<div class="card card-pad mt-3">
+<div class="card card-pad mt-4">
   <h3 class="card-title">当前边界</h3>
   <p class="text-secondary mb-0">已提供数据库模型、草稿接口、并发保护示例和任务恢复机制。对象存储、正式提交、审核和批量导出仍需接入。当前没有正式收取学生材料。</p>
 </div>

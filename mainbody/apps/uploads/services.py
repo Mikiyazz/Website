@@ -10,14 +10,14 @@ from pathlib import Path
 import uuid
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count, Q
 from django.utils import timezone
 from apps.accounts.models import User
-from apps.accounts.permissions import is_college_admin, require_student
+from apps.accounts.permissions import is_college_admin, is_target_in_reviewer_scope, require_student
 from apps.activities.models import MaterialRequirement
 from apps.activities.selectors import ensure_activity_open
 from apps.audit.services import record
 from apps.common.errors import Conflict, DomainError, Forbidden, QuotaExceeded
-from apps.reviews.models import ReviewAssignment
 from .models import FileAsset, StorageQuota, UploadSession
 from .policies import (
     SINGLE_FILE_MATERIAL_CODES,
@@ -126,8 +126,119 @@ def remove_chunk_staging_dir(upload) -> None:
         return
 
 
+def resolve_upload_submission(*, owner, activity, submission_id=None):
+    """Resolve and verify the Submission an upload belongs to (optional for legacy callers)."""
+    from apps.submissions.models import Submission
+
+    if submission_id is not None and str(submission_id).strip() != "":
+        try:
+            sub_uuid = uuid.UUID(str(submission_id).strip())
+        except ValueError:
+            raise DomainError("submission_id 必须为有效 UUID。") from None
+        sub = Submission.objects.filter(pk=sub_uuid, owner=owner, activity=activity).first()
+        if sub is None:
+            raise DomainError("目标申报记录不存在或无权操作。")
+        return sub
+    return (
+        Submission.objects.filter(owner=owner, activity=activity)
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+
+
+def _submission_upload_scope_q(*, owner_id, activity_id, submission):
+    """Build queryset filter scoping uploads to one submission (legacy null fallback only when unique)."""
+    from apps.submissions.models import Submission
+
+    if submission is None:
+        return Q(submission__isnull=True)
+    sub_count = Submission.objects.filter(owner_id=owner_id, activity_id=activity_id).count()
+    if sub_count <= 1:
+        return Q(submission_id=submission.id) | Q(submission__isnull=True)
+    return Q(submission_id=submission.id)
+
+
+def uploads_for_submission(submission, *, requirement_code: str | None = None) -> list[UploadSession]:
+    """Return valid completed UploadSessions belonging exclusively to the given Submission."""
+    if submission is None:
+        return []
+    scope_q = _submission_upload_scope_q(
+        owner_id=submission.owner_id,
+        activity_id=submission.activity_id,
+        submission=submission,
+    )
+    qs = (
+        UploadSession.objects.select_related("requirement", "fileasset")
+        .filter(
+            scope_q,
+            owner_id=submission.owner_id,
+            requirement__activity_id=submission.activity_id,
+            status=UploadSession.Status.COMPLETE,
+            fileasset__status=FileAsset.Status.VALID,
+        )
+        .order_by("created_at", "id")
+    )
+    if requirement_code:
+        qs = qs.filter(requirement__code=requirement_code)
+    return list(qs)
+
+
+def map_uploads_by_submission(
+    submissions,
+    *,
+    activity=None,
+    requirement_code: str | None = None,
+) -> dict[uuid.UUID, list[UploadSession]]:
+    """Batch-fetch valid completed uploads keyed by submission.id without N+1 queries."""
+    from apps.submissions.models import Submission
+
+    sub_list = list(submissions or [])
+    result: dict[uuid.UUID, list[UploadSession]] = {sub.id: [] for sub in sub_list}
+    if not sub_list:
+        return result
+
+    owner_ids = {sub.owner_id for sub in sub_list}
+    activity_ids = {sub.activity_id for sub in sub_list}
+    if activity is not None:
+        activity_ids.add(getattr(activity, "id", activity))
+
+    count_rows = (
+        Submission.objects.filter(owner_id__in=owner_ids, activity_id__in=activity_ids)
+        .values("owner_id", "activity_id")
+        .annotate(total=Count("id"))
+    )
+    counts_by_pair = {(row["owner_id"], row["activity_id"]): row["total"] for row in count_rows}
+    single_sub_by_pair = {}
+    for sub in sub_list:
+        pair = (sub.owner_id, sub.activity_id)
+        if counts_by_pair.get(pair, 0) <= 1:
+            single_sub_by_pair[pair] = sub.id
+
+    qs = (
+        UploadSession.objects.select_related("requirement", "fileasset")
+        .filter(
+            owner_id__in=owner_ids,
+            requirement__activity_id__in=activity_ids,
+            status=UploadSession.Status.COMPLETE,
+            fileasset__status=FileAsset.Status.VALID,
+        )
+        .order_by("created_at", "id")
+    )
+    if requirement_code:
+        qs = qs.filter(requirement__code=requirement_code)
+
+    for up in qs:
+        if up.submission_id in result:
+            result[up.submission_id].append(up)
+        elif up.submission_id is None:
+            fallback_sub_id = single_sub_by_pair.get((up.owner_id, up.requirement.activity_id))
+            if fallback_sub_id is not None:
+                result[fallback_sub_id].append(up)
+    return result
+
+
 @transaction.atomic
-def reserve_upload(*, actor, requirement_id, filename, declared_bytes, request_key):
+def reserve_upload(*, actor, requirement_id, filename, declared_bytes, request_key, submission_id=None):
     require_student(actor)
     try:
         request_key = uuid.UUID(str(request_key))
@@ -147,10 +258,23 @@ def reserve_upload(*, actor, requirement_id, filename, declared_bytes, request_k
         return existing
     rule = MaterialRequirement.objects.select_related("activity").get(pk=requirement_id)
     ensure_activity_open(rule.activity, owner)
+    target_submission = resolve_upload_submission(
+        owner=owner,
+        activity=rule.activity,
+        submission_id=submission_id,
+    )
+    from apps.submissions.services import ensure_submission_editable_by_student
+
+    ensure_submission_editable_by_student(target_submission)
     extension = validate_metadata(filename=filename, declared_bytes=declared_bytes, requirement=rule)
     if UploadSession.objects.filter(owner=owner, status__in=ACTIVE_STATES).count() >= settings.MAX_ACTIVE_UPLOADS_PER_USER:
         raise Conflict("同时上传任务过多，请先完成或取消已有任务。")
-    siblings = UploadSession.objects.filter(owner=owner, requirement=rule).exclude(
+    scope_q = _submission_upload_scope_q(
+        owner_id=owner.pk,
+        activity_id=rule.activity_id,
+        submission=target_submission,
+    )
+    siblings = UploadSession.objects.filter(scope_q, owner=owner, requirement=rule).exclude(
         status=UploadSession.Status.ABORTED
     )
     if siblings.count() >= rule.max_count:
@@ -172,6 +296,7 @@ def reserve_upload(*, actor, requirement_id, filename, declared_bytes, request_k
     quota.save(update_fields=["reserved_bytes", "updated_at"])
     return UploadSession.objects.create(
         owner=owner,
+        submission=target_submission,
         requirement=rule,
         quota=quota,
         request_key=request_key,
@@ -202,7 +327,7 @@ def cancel_unstarted_reservation(*, actor, upload_id):
 
 
 @transaction.atomic
-def direct_upload(*, actor, requirement_id, file_obj, replace_upload_id=None, request_key=None):
+def direct_upload(*, actor, requirement_id, file_obj, submission_id=None, replace_upload_id=None, request_key=None):
     """Stream an uploaded file to MEDIA_ROOT after double hard validation and overwrite/cleanup old files."""
     require_student(actor)
     if file_obj is None:
@@ -232,11 +357,14 @@ def direct_upload(*, actor, requirement_id, file_obj, replace_upload_id=None, re
     owner = User.objects.select_for_update().get(pk=actor.pk)
     require_student(owner)
 
-    from apps.submissions.models import Submission
+    target_submission = resolve_upload_submission(
+        owner=owner,
+        activity=rule.activity,
+        submission_id=submission_id,
+    )
+    from apps.submissions.services import ensure_submission_editable_by_student
 
-    existing_sub = Submission.objects.filter(owner=owner, activity=rule.activity).first()
-    if existing_sub and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED):
-        raise Conflict(f"当前申报状态为【{existing_sub.get_status_display()}】，不允许上传或替换材料。")
+    ensure_submission_editable_by_student(target_submission)
 
     quota, _ = StorageQuota.objects.get_or_create(
         owner=owner,
@@ -245,9 +373,14 @@ def direct_upload(*, actor, requirement_id, file_obj, replace_upload_id=None, re
     )
     quota = StorageQuota.objects.select_for_update().get(pk=quota.pk)
 
+    scope_q = _submission_upload_scope_q(
+        owner_id=owner.pk,
+        activity_id=rule.activity_id,
+        submission=target_submission,
+    )
     active_uploads_qs = (
         UploadSession.objects.select_for_update()
-        .filter(owner=owner, requirement=rule)
+        .filter(scope_q, owner=owner, requirement=rule)
         .exclude(status=UploadSession.Status.ABORTED)
         .order_by("created_at")
     )
@@ -368,6 +501,7 @@ def direct_upload(*, actor, requirement_id, file_obj, replace_upload_id=None, re
 
     upload_session = UploadSession.objects.create(
         owner=owner,
+        submission=target_submission,
         requirement=rule,
         quota=quota,
         request_key=resolved_request_key,
@@ -404,28 +538,16 @@ def direct_upload(*, actor, requirement_id, file_obj, replace_upload_id=None, re
     return upload_session, file_asset, replaced_ids
 
 
-def _is_activity_reviewer(actor, activity_id, owner_class) -> bool:
-    """审核老师是否有权处理该活动的这份材料（与 file 访问口径保持一致）。"""
-    if getattr(actor, "role", "") != User.Role.REVIEWER:
-        return False
-    assigned_classes = list(
-        ReviewAssignment.objects.filter(reviewer=actor, activity_id=activity_id).values_list(
-            "class_name", flat=True
-        )
-    )
-    if not assigned_classes or "" in assigned_classes:
-        return True
-    if not owner_class:
-        return False
-    allowed = {str(item).strip() for item in assigned_classes if item and str(item).strip()}
-    return owner_class in allowed
+def _is_activity_reviewer(actor, activity_id, owner) -> bool:
+    """团支书（初审人员）是否有权访问/处理本班同学的该份材料。"""
+    return is_target_in_reviewer_scope(actor, owner, activity_id=activity_id)
 
 
 @transaction.atomic
 def delete_uploaded_file(*, actor, upload_id):
-    """删除附件：本人可删；该活动的管理员/审核老师也可删（纠错用），全部落审计。
+    """删除附件：本人可删；该活动的管理员/本班团支书也可删（纠错用），全部落审计。
 
-    归属校验顺序：先取上传记录 -> 再判"本人 or 学院管理员 or 该活动审核老师" -> 才动配额与磁盘。
+    归属校验顺序：先取上传记录 -> 再判"本人 or 学院管理员 or 本班团支书" -> 才动配额与磁盘。
     非本人且非管理端一律 Forbidden，绝不因为"记录存在"就放行。
     """
     if not getattr(actor, "is_authenticated", False) or not getattr(actor, "is_active", False):
@@ -441,7 +563,7 @@ def delete_uploaded_file(*, actor, upload_id):
 
     acting_admin = is_college_admin(actor)
     acting_reviewer = _is_activity_reviewer(
-        actor, target_upload.requirement.activity_id, target_upload.owner.class_name
+        actor, target_upload.requirement.activity_id, target_upload.owner
     )
     if target_upload.owner_id != actor.pk and not (acting_admin or acting_reviewer):
         raise Forbidden("无权删除他人的上传文件。")
@@ -454,14 +576,15 @@ def delete_uploaded_file(*, actor, upload_id):
     )
 
     if not managed:
-        # 学生自助删除仍受活动窗口与申报状态约束；管理端纠错不受这两个限制。
+        # 学生自助删除受活动窗口与审核锁约束；管理端纠错不受限制。
         ensure_activity_open(upload.requirement.activity, owner)
+        from apps.submissions.services import ensure_submission_editable_by_student
 
-        from apps.submissions.models import Submission
-
-        existing_sub = Submission.objects.filter(owner=owner, activity=upload.requirement.activity).first()
-        if existing_sub and existing_sub.status not in (Submission.Status.DRAFT, Submission.Status.RETURNED):
-            raise Conflict(f"当前申报状态为【{existing_sub.get_status_display()}】，不允许删除材料。")
+        target_sub = upload.submission or resolve_upload_submission(
+            owner=owner,
+            activity=upload.requirement.activity,
+        )
+        ensure_submission_editable_by_student(target_sub)
 
     quota = StorageQuota.objects.select_for_update().get(pk=upload.quota_id)
     asset = FileAsset.objects.select_for_update().filter(upload=upload).first()
@@ -497,16 +620,38 @@ def delete_uploaded_file(*, actor, upload_id):
     return upload
 
 
-def validate_required_materials(*, actor, activity) -> None:
-    """Verify all mandatory materials (application_form=1, practice_report=1, scene_photos=3..5) are validly uploaded."""
-    valid_uploads = list(
-        UploadSession.objects.select_related("requirement", "fileasset").filter(
-            owner=actor,
-            requirement__activity=activity,
-            status=UploadSession.Status.COMPLETE,
-            fileasset__status=FileAsset.Status.VALID,
+def validate_declaration_materials(*, actor, activity, submission=None) -> None:
+    """校验假期前立项申报必交附件：仅要求申报表（application_form）1 份有效 .docx 文件。"""
+    if submission is not None:
+        valid_uploads = uploads_for_submission(submission, requirement_code="application_form")
+    else:
+        valid_uploads = list(
+            UploadSession.objects.select_related("requirement", "fileasset").filter(
+                owner=actor,
+                requirement__activity=activity,
+                requirement__code="application_form",
+                status=UploadSession.Status.COMPLETE,
+                fileasset__status=FileAsset.Status.VALID,
+            )
         )
-    )
+    app_form_count = sum(1 for up in valid_uploads if resolve_file_disk_path(up.object_key).exists())
+    if app_form_count != 1:
+        raise DomainError(f"项目申报必交附件【申报表】需上传 1 份 .docx 文件（当前有效份数：{app_form_count}）。")
+
+
+def validate_required_materials(*, actor, activity, submission=None) -> None:
+    """Verify all mandatory materials (application_form=1, practice_report=1, scene_photos=3..5) are validly uploaded."""
+    if submission is not None:
+        valid_uploads = uploads_for_submission(submission)
+    else:
+        valid_uploads = list(
+            UploadSession.objects.select_related("requirement", "fileasset").filter(
+                owner=actor,
+                requirement__activity=activity,
+                status=UploadSession.Status.COMPLETE,
+                fileasset__status=FileAsset.Status.VALID,
+            )
+        )
     counts_by_code: dict[str, int] = {}
     for up in valid_uploads:
         disk_path = resolve_file_disk_path(up.object_key)
@@ -552,13 +697,13 @@ def get_accessible_upload_for_user(*, actor, upload_or_asset_id) -> tuple[Upload
         raise DomainError("文件 ID 必须为有效 UUID。") from None
 
     upload = (
-        UploadSession.objects.select_related("requirement__activity", "owner", "fileasset")
+        UploadSession.objects.select_related("requirement__activity", "owner", "fileasset", "submission")
         .filter(pk=target_uuid)
         .first()
     )
     if upload is None:
         asset_match = (
-            FileAsset.objects.select_related("upload__requirement__activity", "upload__owner")
+            FileAsset.objects.select_related("upload__requirement__activity", "upload__owner", "upload__submission")
             .filter(pk=target_uuid)
             .first()
         )
@@ -568,14 +713,26 @@ def get_accessible_upload_for_user(*, actor, upload_or_asset_id) -> tuple[Upload
     if upload is None:
         raise UploadSession.DoesNotExist("文件不存在。")
 
-    # Permission check: owner, reviewer for this activity, or college admin
+    # Permission check: owner, teammate in the same team submission, reviewer for this activity, or college admin
     has_access = False
     if upload.owner_id == actor.id:
         has_access = True
     elif is_college_admin(actor):
         has_access = True
-    elif _is_activity_reviewer(actor, upload.requirement.activity_id, upload.owner.class_name):
+    elif _is_activity_reviewer(actor, upload.requirement.activity_id, upload.owner):
         has_access = True
+    else:
+        from apps.submissions.services import find_team_membership_submissions, is_member_of_submission
+
+        if upload.submission is not None:
+            has_access = is_member_of_submission(upload.submission, actor.username)
+        else:
+            team_subs = find_team_membership_submissions(
+                activity=upload.requirement.activity,
+                student_number=actor.username,
+            )
+            if any(sub.owner_id == upload.owner_id for sub in team_subs):
+                has_access = True
 
     if not has_access:
         raise Forbidden("无权访问此文件。")

@@ -1,6 +1,21 @@
+import re
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.db import models
 from apps.common.models import BaseModel
+
+STUDENT_NUMBER_RE = re.compile(r"^\d{8}$")
+GRADE_RE = re.compile(r"^202\d级$")
+CLASS_NAME_RE = re.compile(r"^(?:0[1-9]|[1-9]\d)班$")
+PHONE_RE = re.compile(r"^\d{11}$")
+
+MAJOR_CHOICES = (
+    "计算机类",
+    "人工智能",
+    "计算机科学与技术",
+    "软件工程",
+    "信息安全",
+    "数据科学与大数据技术",
+)
 
 
 def default_password_from_student_number(student_number: str) -> str:
@@ -29,17 +44,18 @@ class User(AbstractUser):
         REVIEWER = "reviewer", "审核人员"
         ADMIN = "college_admin", "学院管理员"
 
-    class Grade(models.TextChoices):
-        FRESHMAN = "大一", "大一"
-        SOPHOMORE = "大二", "大二"
-        JUNIOR = "大三", "大三"
-        SENIOR = "大四", "大四"
-        GRADUATE = "研究生", "研究生"
+    class Major(models.TextChoices):
+        COMPUTER_CATEGORY = "计算机类", "计算机类"
+        AI = "人工智能", "人工智能"
+        CS = "计算机科学与技术", "计算机科学与技术"
+        SE = "软件工程", "软件工程"
+        INFOSEC = "信息安全", "信息安全"
+        DATA_SCIENCE = "数据科学与大数据技术", "数据科学与大数据技术"
 
     real_name = models.CharField("姓名", max_length=100, blank=True)
     class_name = models.CharField("班级", max_length=100, blank=True, db_index=True)
-    grade = models.CharField("年级", max_length=32, choices=Grade.choices, blank=True, default="")
-    major = models.CharField("专业", max_length=100, blank=True, default="")
+    grade = models.CharField("年级", max_length=32, blank=True, default="")
+    major = models.CharField("专业", max_length=100, choices=Major.choices, blank=True, default="")
     phone = models.CharField("手机号", max_length=32, blank=True, default="")
     must_change_password = models.BooleanField("需修改初始密码", default=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
@@ -63,8 +79,8 @@ class StudentRoster(BaseModel):
     student_number = models.CharField(max_length=32, unique=True)
     real_name = models.CharField(max_length=100)
     class_name = models.CharField(max_length=100, db_index=True)
-    grade = models.CharField("年级", max_length=32, choices=User.Grade.choices, blank=True, default="")
-    major = models.CharField("专业", max_length=100, blank=True, default="")
+    grade = models.CharField("年级", max_length=32, blank=True, default="")
+    major = models.CharField("专业", max_length=100, choices=User.Major.choices, blank=True, default="")
     phone = models.CharField("手机号", max_length=32, blank=True, default="")
     user = models.OneToOneField(User, null=True, blank=True, on_delete=models.PROTECT)
     active = models.BooleanField(default=True)

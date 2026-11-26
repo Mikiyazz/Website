@@ -1,0 +1,508 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}成果收集（开学后） · 学院社会实践材料平台{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'vendor/filepond/filepond.min.css' %}">
+<link rel="stylesheet" href="{% static 'vendor/filepond/plugins/filepond-plugin-image-preview.min.css' %}">
+<link rel="stylesheet" href="{% static 'vendor/filepond/plugins/filepond-plugin-file-poster.min.css' %}">
+{% endblock %}
+
+{% block content %}
+<!-- 顶部问候与成果 KPI 阵列 -->
+<section class="hero-editorial d-print-none">
+  <div>
+    <div class="hero-greeting-eyebrow">下学期开学后 · 社会实践成果收集与审核</div>
+    <h1 class="hero-greeting-title">成果收集</h1>
+    <p class="hero-greeting-sub">
+      上传实践报告、现场照片、宣讲视频与其他证明材料并提交审核
+      {% if selected_activity %} · 当前活动：<strong>{{ selected_activity.title }}</strong>{% endif %}
+      {% if window_label %} · {{ window_label }}{% endif %}
+      {% if selected_activity %}
+      <span class="badge badge-{{ status_badge_code }} ms-2">{{ status_badge_label }}</span>
+      {% if in_whitelist %}
+      <span class="badge badge-whitelist ms-1">本人已在补交白名单内</span>
+      {% endif %}
+      {% endif %}
+    </p>
+  </div>
+  <div class="hero-kpi-strip">
+    <div class="hero-kpi-item">
+      <div class="hero-kpi-top">
+        <span class="hero-kpi-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-2"/><path d="M9 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z"/><path d="M9 14l2 2l4 -4"/></svg>
+        </span>
+        <span class="kpi-value">{% if declaration_confirmed %}已报{% else %}待报{% endif %}</span>
+      </div>
+      <span class="hero-kpi-label">立项申报</span>
+    </div>
+    <div class="hero-kpi-item">
+      <div class="hero-kpi-top">
+        <span class="hero-kpi-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/></svg>
+        </span>
+        <span class="kpi-value" id="outcomes-kpi-uploaded">0</span>
+      </div>
+      <span class="hero-kpi-label">已传成果项</span>
+    </div>
+    <div class="hero-kpi-item">
+      <div class="hero-kpi-top">
+        <span class="hero-kpi-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"/><path d="M9 12l2 2l4 -4"/></svg>
+        </span>
+        <span class="kpi-value" id="outcomes-kpi-percent">0%</span>
+      </div>
+      <span class="hero-kpi-label">成果准备度</span>
+    </div>
+  </div>
+</section>
+
+<!-- 快捷操作与活动切换条 -->
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 d-print-none">
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    {% if open_activities|length > 1 %}
+    <form method="get" class="d-flex align-items-center gap-2">
+      <label class="form-label mb-0 text-secondary text-nowrap" for="activity-switcher">切换活动</label>
+      <select class="form-select form-select-sm" id="activity-switcher" name="activity_id" onchange="this.form.submit()">
+        {% for activity in open_activities %}
+        <option value="{{ activity.id }}" {% if selected_activity and activity.id == selected_activity.id %}selected{% endif %}>{{ activity.title }}</option>
+        {% endfor %}
+      </select>
+    </form>
+    {% endif %}
+    {% if selected_activity and all_submission_items|length > 1 %}
+    <form method="get" class="d-flex align-items-center gap-2">
+      <input type="hidden" name="activity_id" value="{{ selected_activity.id }}">
+      <label class="form-label mb-0 text-secondary text-nowrap" for="outcomes-submission-switcher">选择申报项目</label>
+      <select class="form-select form-select-sm" id="outcomes-submission-switcher" name="submission_id" onchange="this.form.submit()">
+        {% for item in all_submission_items %}
+        <option value="{{ item.id }}" {% if item.is_selected %}selected{% endif %}>
+          {{ item.project_name }}（{{ item.team_summary }} · {{ item.badge_label }}）
+        </option>
+        {% endfor %}
+      </select>
+    </form>
+    {% endif %}
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <a class="btn btn-sm btn-outline-primary" href="{{ apply_url }}">查看/修改项目申报 ↗</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ workbench_url }}">返回工作台</a>
+  </div>
+</div>
+
+<!-- 上传进度：上传中常显；全部完成后自动收起 -->
+<div class="upload-progress-bar d-none mb-3" id="upload-progress-bar" role="status" aria-live="polite">
+  <div class="d-flex justify-content-between align-items-center mb-1">
+    <span class="text-secondary small" id="upload-progress-label">正在上传…</span>
+    <span class="text-secondary small tabular-nums" id="upload-progress-percent">0%</span>
+  </div>
+  <div class="progress progress-sm" role="progressbar" aria-label="成果附件上传总进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="upload-progress-track">
+    <div class="progress-bar bg-primary" id="upload-progress-fill" style="width: 0%"></div>
+  </div>
+  <div class="form-hint mt-1" id="upload-progress-hint">上传过程中请勿关闭页面；断线后重新选择同一文件可断点续传。</div>
+</div>
+
+{% if not selected_activity %}
+<div class="alert alert-warning mb-4" role="alert" id="no-open-activity">
+  <div class="d-flex">
+    <div>
+      <h4 class="alert-title">当前没有开放中的实践活动</h4>
+      <div class="text-secondary">活动尚未开放、已截止或未向你的班级开放，暂时无法提交成果。请返回工作台查看活动窗口或联系指导老师。</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if error_message %}
+<div class="alert alert-danger mb-4" role="alert" id="outcomes-error-banner">{{ error_message }}</div>
+{% endif %}
+
+{% if is_returned %}
+<div id="returned-alert-banner" class="alert-returned mb-4" role="alert" data-status="returned">
+  <h3 class="h3">您的实践成果已被【打回修改】</h3>
+  {% if latest_returned_record %}
+  <p class="mb-1 small">
+    打回阶段：<strong>{{ latest_returned_record.get_stage_display }}</strong> ·
+    审核人：<strong>{{ latest_returned_record.reviewer.real_name|default:latest_returned_record.reviewer.username }}</strong> ·
+    时间：<span class="tabular-nums">{{ latest_returned_record.created_at|date:"Y-m-d H:i" }}</span>
+  </p>
+  <div class="returned-comment-box" id="returned-comment-content">{{ latest_returned_record.comment }}</div>
+  {% else %}
+  <div class="returned-comment-box" id="returned-comment-content">请核对材料规范后修改重交。</div>
+  {% endif %}
+  <p class="mb-0 small">
+    请在下方直接删除或重新上传成果附件，核对无误后点击「确认提交成果审核」。如需修改项目信息或更换申报表，请前往「我的申报」。
+  </p>
+</div>
+{% endif %}
+
+{% if is_locked %}
+<div class="alert alert-warning mb-4" role="alert" id="apply-locked-banner" data-readonly-locked="true">
+  <h4 class="alert-title">成果材料已锁定</h4>
+  <div class="text-secondary">{{ lock_reason }}</div>
+</div>
+{% endif %}
+
+{% if selected_activity and not declaration_confirmed and not is_locked %}
+<div class="alert alert-warning mb-4" role="alert" id="declaration-required-banner">
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+      <strong>尚未完成假期前项目立项申报</strong>
+      <div class="small mt-1">提交成果审核前，需先在「我的申报」栏目完成项目信息、团队成员及 <code>.docx</code> 申报表提交。</div>
+    </div>
+    <a class="btn btn-sm btn-primary text-nowrap" href="{{ apply_url }}">前往我的申报 ↗</a>
+  </div>
+</div>
+{% endif %}
+
+<!-- 不对称 Bento 主网格：左侧 8–9 列成果上传区 + 右侧 3–4 列炭黑检查清单 -->
+<div class="row g-4 align-items-start">
+  <div class="col-12 col-lg-8 col-xl-9 d-flex flex-column gap-4">
+    <div class="card" id="apply-wizard"
+         data-wizard-mode="outcomes"
+         data-activity-id="{% if selected_activity %}{{ selected_activity.id }}{% endif %}"
+         data-submission-id="{% if submission %}{{ submission.id }}{% endif %}"
+         data-version="{{ submission.version|default:0 }}"
+         data-submit-url="{{ submit_url }}"
+         data-detail-url="{{ detail_url }}"
+         data-apply-url="{{ apply_url }}"
+         data-success-url="{{ success_url }}"
+         data-lookup-url="{{ lookup_url }}"
+         data-chunk-start-url="{% url 'upload-chunk-start' %}"
+         data-chunk-upload-url="{% url 'upload-chunk-upload' %}"
+         data-chunk-complete-url="{% url 'upload-chunk-complete' %}"
+         data-direct-upload-url="{% url 'upload-direct' %}"
+         data-declaration-submitted="{{ declaration_confirmed|yesno:'true,false' }}"
+         data-upload-locked="{{ is_locked|yesno:'true,false' }}"
+         data-can-submit="{{ can_submit|yesno:'true,false' }}">
+      <input type="hidden" id="apply-csrf-token" value="{{ csrf_token }}">
+
+      <div class="card-body d-flex flex-column gap-4">
+        <!-- 1. 已关联的假期前立项申报摘要（只读） -->
+        <section id="outcomes-project-summary">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <h3 class="card-title mb-0">关联立项项目信息</h3>
+              {% if declaration_confirmed %}
+              <span class="badge badge-final_approved">已完成项目申报</span>
+              {% else %}
+              <span class="badge badge-draft">待完成项目申报</span>
+              {% endif %}
+            </div>
+            {% if not is_locked %}
+            <a class="btn btn-sm btn-outline-secondary" href="{{ apply_url }}">前往修改申报信息 ↗</a>
+            {% endif %}
+          </div>
+          <div class="bento-nested">
+            <div class="row g-3">
+              <div class="col-12 col-md-6">
+                <div class="small text-secondary mb-1">项目名称</div>
+                <div class="fw-semibold text-body">{{ draft_data.project_name|default:"尚未填写（请先前往「我的申报」完成填写）" }}</div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="small text-secondary mb-1">项目类别</div>
+                <div class="fw-semibold text-body">{{ draft_data.category|default:"—" }}</div>
+              </div>
+              <div class="col-12 col-md-4">
+                <div class="small text-secondary mb-1">指导老师</div>
+                <div class="text-body">{{ draft_data.advisor_name|default:"尚未填写" }}</div>
+              </div>
+              <div class="col-12 col-md-4">
+                <div class="small text-secondary mb-1">实践地点</div>
+                <div class="text-body">{{ draft_data.practice_place|default:"尚未填写" }}</div>
+              </div>
+              <div class="col-12 col-md-4">
+                <div class="small text-secondary mb-1">起止日期</div>
+                <div class="text-body tabular-nums">
+                  {% if draft_data.date_start and draft_data.date_end %}
+                    {{ draft_data.date_start }} 至 {{ draft_data.date_end }}
+                  {% else %}
+                    尚未填写
+                  {% endif %}
+                </div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="small text-secondary mb-1">申报模式与团队成员</div>
+                <div class="text-body">
+                  {% if draft_data.declaration_type == "team" %}
+                    团队申报（{{ draft_data.team_members|length }} 名队员）
+                    {% if draft_data.team_members %}
+                    <div class="d-flex flex-wrap gap-1 mt-1">
+                      {% for member in draft_data.team_members %}
+                      <span class="badge badge-optional text-body">{{ member.real_name|default:"未命名" }}（{{ member.student_number }}）</span>
+                      {% endfor %}
+                    </div>
+                    {% endif %}
+                  {% else %}
+                    个人申报
+                  {% endif %}
+                </div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="small text-secondary mb-1">已提交申报表（.docx）</div>
+                <div>
+                  {% if declaration_confirmed %}
+                    {% for up in declaration_form_uploads %}
+                    <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
+                      <span class="small fw-semibold text-truncate">{{ up.original_name }} <span class="text-secondary tabular-nums">（{{ up.size_display }}）</span></span>
+                      <a class="btn btn-sm btn-outline-secondary py-0 px-2" href="{{ up.download_url }}">下载</a>
+                    </div>
+                    {% endfor %}
+                  {% else %}
+                    <span class="small text-danger">尚未提交申报表（请前往「我的申报」完成确认提交）</span>
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. 成果材料上传区（4 项等宽卡片） -->
+        <section id="outcomes-materials-section">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <h3 class="card-title mb-0">成果材料上传</h3>
+            <span class="small text-secondary">实践报告（.pdf）与现场照片（3–5 张）为必交项；宣讲视频与其他证明材料为选交项</span>
+          </div>
+          <div class="row g-3">
+            {% for material in materials %}
+            <div class="col-12">
+              <div class="card mb-0 h-100" data-material-card="{{ material.code }}">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <h4 class="card-title mb-0">
+                    {{ material.title }}
+                    {% if material.required %}
+                    <span class="badge badge-required ms-2">必交</span>
+                    {% else %}
+                    <span class="badge badge-optional ms-2">选交</span>
+                    {% endif %}
+                  </h4>
+                  <div class="card-actions text-secondary small tabular-nums" data-material-limit="{{ material.code }}">
+                    {{ material.limit_label }}
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="mb-2 text-secondary small">
+                    {{ material.count_hint }} · 允许 {{ material.allowed_extensions|join:" / " }}
+                  </div>
+                  <input type="file"
+                         class="filepond-zone"
+                         id="pond-{{ material.code }}"
+                         name="{{ material.code }}"
+                         data-material-code="{{ material.code }}"
+                         aria-label="{{ material.title }} 上传区">
+                  <div class="form-hint mt-2" data-material-hint="{{ material.code }}">
+                    {% if material.code == "scene_photos" %}至少 3 张、最多 5 张现场照片，单张 ≤ 10MB。{% endif %}
+                    {% if material.code == "practice_report" %}仅接受 .pdf 实践报告，单份 ≤ 20MB。{% endif %}
+                    {% if material.code == "video" %}选交，.mp4 / .mov / .avi / .mkv，单份 ≤ 300MB。{% endif %}
+                    {% if material.code == "other_materials" %}选交，最多 10 份（其中 ZIP 打包材料最多 5 份）；普通材料单份 ≤ 50MB，ZIP 打包材料单份 ≤ 2000MB。{% endif %}
+                  </div>
+                  <div class="mt-3 pt-2 border-top {% if not material.uploads %}d-none{% endif %}" data-saved-uploads-wrap="{{ material.code }}">
+                    <div class="small fw-semibold text-secondary mb-2">
+                      已保存/已上传材料（<span data-saved-uploads-count="{{ material.code }}">{{ material.uploads|length }}</span> 份）：
+                    </div>
+                    <ul class="uploaded-file-list mt-0" data-saved-uploads-list="{{ material.code }}">
+                      {% for up in material.uploads %}
+                      <li class="uploaded-file-item" data-saved-upload-id="{{ up.id }}" data-upload-name="{{ up.original_name }}">
+                        <div class="text-truncate me-2">
+                          <strong>{{ up.original_name }}</strong>
+                          <span class="small text-secondary ms-1 tabular-nums">（{{ up.size_display }}）</span>
+                        </div>
+                        <div class="d-flex gap-2 align-items-center flex-shrink-0">
+                          {% if up.can_inline_preview %}
+                          <a class="btn btn-sm btn-outline-secondary" href="{{ up.preview_url }}" target="_blank" rel="noopener">在线预览</a>
+                          {% endif %}
+                          <a class="btn btn-sm btn-outline-secondary" href="{{ up.download_url }}">下载</a>
+                          {% if not is_locked %}
+                          <button type="button" class="btn btn-sm btn-outline-danger btn-delete-saved-upload"
+                                  data-upload-id="{{ up.id }}" data-material-code="{{ material.code }}">删除</button>
+                          {% endif %}
+                        </div>
+                      </li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </section>
+
+        <div class="alert alert-danger d-none mb-0" id="submit-error" role="alert"></div>
+        <div class="alert d-none mb-0" id="draft-save-feedback" role="status"></div>
+      </div>
+
+      <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span class="text-secondary small" id="submit-readiness">
+          {% if is_locked %}
+          成果材料当前已锁定，不可修改。
+          {% else %}
+          附件上传后自动保存至草稿；确认立项申报与成果材料均齐全后，点击右侧按钮提交团支书初审与学院终审。
+          {% endif %}
+        </span>
+        <button type="button" class="btn btn-primary" id="btn-confirm-submit" {% if not can_submit %}disabled{% endif %}>
+          {% if outcomes_submitted %}更新并重新提交成果审核{% else %}确认提交成果审核{% endif %}
+        </button>
+      </div>
+    </div>
+
+    {% if review_records %}
+    <div class="card card-pad" id="outcomes-review-history">
+      <h3 class="card-title mb-3">历次审核记录</h3>
+      <div class="table-responsive table-wrap">
+        <table class="table table-vcenter">
+          <thead>
+            <tr>
+              <th>审核阶段</th>
+              <th>审核结论</th>
+              <th>审核意见</th>
+              <th>审核人</th>
+              <th>审核时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for rec in review_records %}
+            <tr>
+              <td>{{ rec.get_stage_display }}</td>
+              <td>
+                <span class="badge {% if rec.decision == 'approved' %}badge-final_approved{% else %}badge-returned{% endif %}">
+                  {{ rec.get_decision_display }}
+                </span>
+              </td>
+              <td>{{ rec.comment|default:"（无附加意见）" }}</td>
+              <td>{{ rec.reviewer.real_name|default:rec.reviewer.username }}</td>
+              <td class="tabular-nums small text-secondary">{{ rec.created_at|date:"Y-m-d H:i" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- 右侧哑光炭黑高对比成果检查清单 -->
+  <div class="col-12 col-lg-4 col-xl-3">
+    <aside class="charcoal-anchor-card sticky-lg-top" style="top: 20px;" aria-label="成果提交检查清单">
+      <div class="d-flex justify-content-between align-items-start gap-2">
+        <div>
+          <div class="small charcoal-muted">成果提交前核对</div>
+          <h3 class="card-title mb-0 mt-1">成果检查清单</h3>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+          <span class="charcoal-counter" id="outcomes-checklist-ratio">0/3</span>
+          <a class="card-corner-btn" href="{{ apply_url }}" title="前往我的申报">↗</a>
+        </div>
+      </div>
+
+      <ul class="charcoal-checklist" id="outcomes-checklist">
+        <li class="charcoal-check-item {% if declaration_confirmed %}is-done{% endif %}" data-check-key="declaration">
+          <div class="charcoal-check-meta">
+            <span class="charcoal-check-title">立项申报已完成</span>
+            <span class="charcoal-check-sub">项目信息、成员与 .docx 申报表</span>
+          </div>
+          <span class="charcoal-check-dot" aria-hidden="true">✓</span>
+        </li>
+        <li class="charcoal-check-item" data-check-key="practice_report">
+          <div class="charcoal-check-meta">
+            <span class="charcoal-check-title">实践报告已上传</span>
+            <span class="charcoal-check-sub">必交 1 份 (.pdf)</span>
+          </div>
+          <span class="charcoal-check-dot" aria-hidden="true">✓</span>
+        </li>
+        <li class="charcoal-check-item" data-check-key="scene_photos">
+          <div class="charcoal-check-meta">
+            <span class="charcoal-check-title">现场照片 3–5 张</span>
+            <span class="charcoal-check-sub">必交 3–5 张 (.jpg/.png)</span>
+          </div>
+          <span class="charcoal-check-dot" aria-hidden="true">✓</span>
+        </li>
+      </ul>
+
+      <div class="mt-3 pt-3 d-flex flex-column gap-2" style="border-top: 1px solid rgba(255,255,255,0.08);">
+        <div class="small charcoal-muted">
+          {% if is_locked %}
+          当前成果已进入只读锁定状态，材料仅支持预览与下载。
+          {% else %}
+          全部 3 项点亮后即可点击「确认提交成果审核」，进入团支书初审与学院终审。
+          {% endif %}
+        </div>
+        <a class="btn btn-outline-light btn-sm w-100" href="{{ apply_url }}">查看/修改「我的申报」 ↗</a>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script type="application/json" id="wizard-materials-json">{{ materials_json|safe }}</script>
+<script type="application/json" id="wizard-team-json">{{ team_members_json|safe }}</script>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'vendor/filepond/filepond.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-validate-type.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-validate-size.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-image-validate-size.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-image-preview.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-image-exif-orientation.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-poster.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-metadata.min.js' %}"></script>
+<script src="{% static 'vendor/filepond/locale/zh-cn.global.js' %}"></script>
+<script src="{% static 'js/apply-wizard.js' %}?v=20261126-6"></script>
+<script>
+(function () {
+  "use strict";
+
+  function countForCode(code) {
+    var savedList = document.querySelector('[data-saved-uploads-list="' + code + '"]');
+    var saved = savedList ? savedList.querySelectorAll('[data-saved-upload-id]').length : 0;
+    var card = document.querySelector('[data-material-card="' + code + '"]');
+    var pondItems = card ? card.querySelectorAll(".filepond--item").length : 0;
+    return saved + pondItems;
+  }
+
+  function refreshOutcomesBento() {
+    var wizardEl = document.getElementById("apply-wizard");
+    var declDone = Boolean(wizardEl && wizardEl.dataset.declarationSubmitted === "true");
+    var repCount = countForCode("practice_report");
+    var photoCount = countForCode("scene_photos");
+    var vidCount = countForCode("video");
+    var othCount = countForCode("other_materials");
+
+    var checks = {
+      declaration: declDone,
+      practice_report: repCount >= 1,
+      scene_photos: photoCount >= 3
+    };
+
+    var doneTotal = 0;
+    Object.keys(checks).forEach(function (key) {
+      var item = document.querySelector('#outcomes-checklist [data-check-key="' + key + '"]');
+      if (item) { item.classList.toggle("is-done", Boolean(checks[key])); }
+      if (checks[key]) { doneTotal += 1; }
+    });
+
+    var ratioEl = document.getElementById("outcomes-checklist-ratio");
+    if (ratioEl) { ratioEl.textContent = doneTotal + "/3"; }
+
+    var uploadedCategories = 0;
+    if (repCount > 0) uploadedCategories += 1;
+    if (photoCount > 0) uploadedCategories += 1;
+    if (vidCount > 0) uploadedCategories += 1;
+    if (othCount > 0) uploadedCategories += 1;
+
+    var kpiUp = document.getElementById("outcomes-kpi-uploaded");
+    if (kpiUp) { kpiUp.textContent = String(uploadedCategories); }
+    var kpiPct = document.getElementById("outcomes-kpi-percent");
+    if (kpiPct) { kpiPct.textContent = Math.round((doneTotal / 3) * 100) + "%"; }
+  }
+
+  document.addEventListener("FilePond:addfile", refreshOutcomesBento);
+  document.addEventListener("FilePond:removefile", refreshOutcomesBento);
+  document.addEventListener("FilePond:processfile", refreshOutcomesBento);
+  document.addEventListener("apply:uploads-changed", refreshOutcomesBento);
+  document.addEventListener("DOMContentLoaded", refreshOutcomesBento);
+  window.setTimeout(refreshOutcomesBento, 200);
+})();
+</script>
+{% endblock %}

@@ -6,32 +6,25 @@ from apps.common.api import endpoint, json_body
 from apps.common.errors import DomainError, Forbidden
 from apps.exports.services import resolve_status_filter
 from apps.submissions.models import Submission
-from apps.uploads.models import FileAsset, UploadSession
 from apps.uploads.policies import INLINE_PREVIEW_EXTENSIONS
-from .selectors import reviewable_submissions
+from apps.uploads.services import map_uploads_by_submission, uploads_for_submission
+from .selectors import declaration_type_filter_q, reviewable_submissions
 from .services import review_submission
 
 
-def serialize_submission_for_review(sub: Submission, uploads_by_owner=None):
+def serialize_submission_for_review(sub: Submission, uploads_by_owner=None, uploads_by_submission=None):
     draft = sub.draft_data if isinstance(sub.draft_data, dict) else {}
     project_name = str(draft.get("project_name") or draft.get("title") or "").strip()
     category = str(draft.get("category") or "").strip()
     declaration_type = str(draft.get("declaration_type") or "individual").strip()
     team_members = draft.get("team_members") if isinstance(draft.get("team_members"), list) else []
 
-    if uploads_by_owner is not None:
+    if uploads_by_submission is not None:
+        user_uploads = uploads_by_submission.get(sub.id, [])
+    elif uploads_by_owner is not None:
         user_uploads = uploads_by_owner.get(sub.owner_id, [])
     else:
-        user_uploads = list(
-            UploadSession.objects.select_related("requirement", "fileasset")
-            .filter(
-                owner_id=sub.owner_id,
-                requirement__activity_id=sub.activity_id,
-                status=UploadSession.Status.COMPLETE,
-                fileasset__status=FileAsset.Status.VALID,
-            )
-            .order_by("created_at")
-        )
+        user_uploads = uploads_for_submission(sub)
 
     attachments = []
     for up in user_uploads:
@@ -108,6 +101,11 @@ def review(request, submission_id):
     decision = data.get("decision")
     comment = data.get("comment", "")
     revision_id = data.get("revision_id")
+    raw_confirm = data.get("confirm_approved_return") if "confirm_approved_return" in data else data.get("confirm_return")
+    if isinstance(raw_confirm, bool):
+        confirm_approved_return = raw_confirm
+    else:
+        confirm_approved_return = str(raw_confirm or "").strip().lower() in ("1", "true", "yes", "on")
 
     record_obj, submission = review_submission(
         actor=request.user,
@@ -116,6 +114,7 @@ def review(request, submission_id):
         decision=decision,
         comment=comment,
         revision_id=revision_id,
+        confirm_approved_return=confirm_approved_return,
     )
 
     return JsonResponse(
@@ -155,23 +154,18 @@ def review_list(request):
     if class_param and str(class_param).strip():
         qs = qs.filter(owner__class_name=str(class_param).strip())
 
-    submissions = list(qs.order_by("-updated_at")[:100])
-    owner_ids = [s.owner_id for s in submissions]
-    uploads_by_owner = {}
-    if owner_ids:
-        for up in (
-            UploadSession.objects.select_related("requirement", "fileasset")
-            .filter(
-                owner_id__in=owner_ids,
-                requirement__activity_id=activity_id,
-                status=UploadSession.Status.COMPLETE,
-                fileasset__status=FileAsset.Status.VALID,
-            )
-            .order_by("created_at")
-        ):
-            uploads_by_owner.setdefault(up.owner_id, []).append(up)
+    category_param = request.GET.get("category")
+    if category_param and str(category_param).strip():
+        qs = qs.filter(draft_data__category=str(category_param).strip())
 
-    items = [serialize_submission_for_review(s, uploads_by_owner=uploads_by_owner) for s in submissions]
+    decl_q = declaration_type_filter_q(request.GET.get("declaration_type"))
+    if decl_q is not None:
+        qs = qs.filter(decl_q)
+
+    submissions = list(qs.order_by("-updated_at")[:100])
+    uploads_by_submission = map_uploads_by_submission(submissions, activity=activity_id)
+
+    items = [serialize_submission_for_review(s, uploads_by_submission=uploads_by_submission) for s in submissions]
     return JsonResponse({"items": items, "limit": 100})
 
 

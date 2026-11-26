@@ -36,12 +36,17 @@ class Submission(BaseModel):
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.DRAFT)
     draft_data = models.JSONField(default=dict, blank=True)
     version = models.PositiveIntegerField(default=0)
+    # 假期前项目立项申报（免审核，提交即完成备案）；与下学期成果收集审核状态相互独立。
+    declaration_submitted = models.BooleanField("已完成项目申报", default=False)
+    declaration_submitted_at = models.DateTimeField("项目申报提交时间", null=True, blank=True)
     # 命中补交白名单且在截止后提交：导出归档时文件名前加 late_ 前缀，方便老师区分。
     is_late_submission = models.BooleanField(default=False)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["owner", "activity"], name="unique_student_activity_submission")]
-        indexes = [models.Index(fields=["activity", "status", "created_at"])]
+        indexes = [
+            models.Index(fields=["activity", "status", "created_at"]),
+            models.Index(fields=["owner", "activity", "updated_at"]),
+        ]
 
     @property
     def badge_status(self) -> str:

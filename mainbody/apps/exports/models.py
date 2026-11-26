@@ -35,3 +35,19 @@ class ExportJob(BaseModel):
         if self.total <= 0:
             return 0
         return min(99, int(self.current * 100 / self.total))
+
+    @property
+    def export_mode(self) -> str:
+        from .services import DEFAULT_EXPORT_MODE, EXPORT_MODE_LABELS
+
+        raw = str((self.filters or {}).get("mode") or "").strip()
+        return raw if raw in EXPORT_MODE_LABELS else DEFAULT_EXPORT_MODE
+
+    @property
+    def export_mode_label(self) -> str:
+        from .services import EXPORT_MODE_LABELS
+
+        saved = str((self.filters or {}).get("mode_label") or "").strip()
+        if saved:
+            return saved
+        return EXPORT_MODE_LABELS.get(self.export_mode, "导出申报表和成果")

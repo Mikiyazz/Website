@@ -44,11 +44,15 @@ def _build_attachment_response(file_handle, filename: str, content_type: str) ->
 def export_activity_excel_view(request, activity_id):
     class_name = request.GET.get("class_name") or request.GET.get("class")
     status = request.GET.get("status")
+    category = request.GET.get("category")
+    declaration_type = request.GET.get("declaration_type")
     tmp_file, filename = export_activity_excel_stream(
         actor=request.user,
         activity_id=activity_id,
         class_name=class_name,
         status=status,
+        category=category,
+        declaration_type=declaration_type,
     )
     return _build_attachment_response(
         tmp_file,
@@ -77,11 +81,15 @@ def activity_classes_view(request, activity_id):
 def export_activity_class_zip_view(request, activity_id):
     class_name = request.GET.get("class_name") or request.GET.get("class")
     status = request.GET.get("status")
+    category = request.GET.get("category")
+    declaration_type = request.GET.get("declaration_type")
     tmp_file, filename = export_class_zip_stream(
         actor=request.user,
         activity_id=activity_id,
         class_name=class_name,
         status=status,
+        category=category,
+        declaration_type=declaration_type,
     )
     return _build_attachment_response(
         tmp_file,
@@ -124,8 +132,9 @@ def start_export(request):
     activity_id = data.get("activity_id")
     if not activity_id:
         raise DomainError("缺少必要参数：activity_id。")
+    mode = data.get("mode")
 
-    job = create_activity_export_job(actor=request.user, activity_id=activity_id)
+    job = create_activity_export_job(actor=request.user, activity_id=activity_id, mode=mode)
     try:
         export_activity_submissions.delay(str(job.activity_id), str(request.user.pk), str(job.pk))
     except Exception as exc:  # noqa: BLE001 - broker 不可用要落库，页面才能提示重试
