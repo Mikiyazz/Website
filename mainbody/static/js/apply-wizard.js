@@ -227,6 +227,7 @@
     });
     numberInput.addEventListener('input', function () {
       nameInput.value = '';
+      row.dataset.className = '';
       errorHint.classList.add('d-none');
       numberInput.classList.remove('is-invalid');
     });
@@ -243,6 +244,15 @@
 
   var lookupCache = {};
 
+  // 记住学号查询带回的姓名与班级：提交草稿时 team_members 每一项都要求 class_name 非空。
+  function applyLookupResult(numberInput, nameInput, info) {
+    nameInput.value = info.real_name || '';
+    var row = numberInput.closest ? numberInput.closest('.team-member-row') : null;
+    if (row) {
+      row.dataset.className = info.class_name || '';
+    }
+  }
+
   function lookupStudent(numberInput, nameInput, errorHint) {
     var studentNumber = String(numberInput.value || '').trim();
     if (!studentNumber) {
@@ -254,7 +264,7 @@
     errorHint.classList.add('d-none');
 
     if (lookupCache[studentNumber]) {
-      nameInput.value = lookupCache[studentNumber];
+      applyLookupResult(numberInput, nameInput, lookupCache[studentNumber]);
       return;
     }
 
@@ -268,8 +278,9 @@
       })
       .then(function (data) {
         if (data && data.exists && data.real_name) {
-          nameInput.value = data.real_name;
-          lookupCache[studentNumber] = data.real_name;
+          var cached = { real_name: data.real_name, class_name: data.class_name || '' };
+          lookupCache[studentNumber] = cached;
+          applyLookupResult(numberInput, nameInput, cached);
         } else {
           nameInput.value = '';
           numberInput.classList.add('is-invalid');
@@ -303,9 +314,12 @@
 
   function collectMembers() {
     return Array.prototype.slice.call(membersBox.querySelectorAll('.team-member-row')).map(function (row) {
+      var number = String(row.querySelector('.member-student-number').value || '').trim();
+      var cached = lookupCache[number] || {};
       return {
-        student_number: String(row.querySelector('.member-student-number').value || '').trim(),
-        real_name: String(row.querySelector('.member-real-name').value || '').trim()
+        student_number: number,
+        real_name: String(row.querySelector('.member-real-name').value || '').trim() || cached.real_name || '',
+        class_name: String(row.dataset.className || cached.class_name || '').trim()
       };
     }).filter(function (member) {
       return member.student_number || member.real_name;
@@ -351,6 +365,69 @@
    * Step 3 FilePond 实例
    * ------------------------------------------------------------------ */
   var ponds = {};
+  // 每个材料类别"服务端已有份数"，初始值由模板注入，上传/删除后实时更新。
+  var uploadedCounts = {};
+
+  function remainingSlots(config) {
+    var pond = ponds[config.code];
+    var sessionCount = pond ? pond.getFiles().length : 0;
+    return Math.max(0, config.max_count - (uploadedCounts[config.code] || 0) - sessionCount);
+  }
+
+  function updateCountLabel(config) {
+    var node = document.querySelector('[data-uploaded-count="' + config.code + '"]');
+    if (node) {
+      node.textContent = String(countOf(config.code));
+    }
+  }
+
+  function refreshZoneLimit(config) {
+    var pond = ponds[config.code];
+    if (pond && typeof pond.setOptions === 'function') {
+      // pond 的 maxFiles 只约束"本次新选的文件"，服务端已有的份数要先从上限里扣掉。
+      pond.setOptions({ maxFiles: Math.max(0, config.max_count - (uploadedCounts[config.code] || 0)) });
+    }
+    updateCountLabel(config);
+  }
+
+  function showUploadError(config, message) {
+    var box = document.querySelector('[data-upload-error="' + config.code + '"]');
+    if (box) {
+      box.textContent = message;
+      box.classList.remove('d-none');
+    }
+  }
+
+  function clearUploadError(config) {
+    var box = document.querySelector('[data-upload-error="' + config.code + '"]');
+    if (box) {
+      box.textContent = '';
+      box.classList.add('d-none');
+    }
+  }
+
+  // 上传失败的文件从 FilePond 列表里摘掉，释放名额，避免"一次失败之后再也传不上"。
+  function dropFailedItem(config, file) {
+    var pond = ponds[config.code];
+    if (!pond) {
+      return;
+    }
+    window.setTimeout(function () {
+      var items = pond.getFiles();
+      for (var i = 0; i < items.length; i += 1) {
+        var item = items[i];
+        var sameFile = item.file === file || (
+          item.file && file && item.file.name === file.name && item.file.size === file.size
+        );
+        if (sameFile) {
+          try {
+            pond.removeFile(item);
+          } catch (e) {}
+          break;
+        }
+      }
+    }, 0);
+  }
 
   function registerFilePondPlugins() {
     if (!window.FilePond) {
@@ -440,7 +517,9 @@
     var options = {
       name: config.code,
       allowMultiple: config.max_count > 1,
-      maxFiles: config.max_count,
+      // 上限要减去"服务端已经存在的份数"，否则刷新页面后 FilePond 会从 0 重新计数，
+      // 用户继续上传必然撞到后端上限，失败项还会占住名额。
+      maxFiles: Math.max(0, config.max_count - (config.uploaded_count || 0)),
       acceptedFileTypes: accepted,
       fileValidateTypeLabelExpectedTypesMap: labelMap,
       fileValidateTypeLabelExpectedTypes: '仅支持 ' + labelList.join(' / ') + ' 格式',
@@ -456,6 +535,13 @@
       // beforeAddFile 拿到的是 FilePond item（含 getMetadata/setFile 等方法），
       // 真正的 File 对象在 item.file 上，name/size 都要从那里取。
       beforeAddFile: function (item) {
+        if (remainingSlots(config) <= 0) {
+          window.alert(
+            '「' + config.title + '」最多 ' + config.max_count + ' 份，当前已满。' +
+            '请先在上方已上传列表中删除不需要的文件，再添加新的。'
+          );
+          return false;
+        }
         var file = (item && item.file) || item || {};
         var countCap = extensionCountCap(config, file.name);
         if (countCap && currentExtensionCount(config.code, file.name) + 1 > countCap) {
@@ -479,6 +565,14 @@
         return true;
       },
       allowImagePreview: Boolean(config.allow_image_preview),
+      onaddfile: function (error) {
+        if (!error) {
+          updateCountLabel(config);
+        }
+      },
+      onremovefile: function () {
+        updateCountLabel(config);
+      },
       allowFilePoster: true,
       imagePreviewMaxHeight: 200,
       allowImageValidateSize: Boolean(config.is_image_zone),
@@ -685,11 +779,17 @@
           progress(true, file.size, file.size);
         }
         finishUploadJob(job);
+        clearUploadError(config);
+        refreshZoneLimit(config);
         load(String((res.data && res.data.upload_id) || (res.data && res.data.id) || file.name));
       })
       .catch(function (err) {
         finishUploadJob(job);
-        error(err && err.message ? err.message : '上传失败，请重试。');
+        var message = (err && err.message) ? err.message : '上传失败，请重试。';
+        showUploadError(config, message);
+        // 失败项如果留在列表里会占用 maxFiles 名额，越传越传不上去，这里主动移除。
+        dropFailedItem(config, file);
+        error(message);
       });
     return { abort: function () { request.abort(); } };
   }
@@ -794,11 +894,16 @@
           progress(true, file.size, file.size);
         }
         finishUploadJob(job);
+        clearUploadError(config);
+        refreshZoneLimit(config);
         load(String((res && res.data && res.data.upload_id) || uploadId));
       })
       .catch(function (err) {
         finishUploadJob(job);
-        error(err && err.message ? err.message : '分片上传失败，请重试。');
+        var message = (err && err.message) ? err.message : '分片上传失败，请重试。';
+        showUploadError(config, message);
+        dropFailedItem(config, file);
+        error(message);
       });
 
     return { abort: cancel };
@@ -814,16 +919,21 @@
       if (!input) {
         return;
       }
+      uploadedCounts[config.code] = Number(config.uploaded_count) || 0;
       ponds[config.code] = window.FilePond.create(input, buildZoneOptions(config));
     });
   }
 
+  // 服务端已有 + 本次浏览器新选的，才是"这份材料实际已有几份"。
+  // 只数 pond 会让刷新后的页面以为一份都没有，从而把已交齐的材料判成"未上传"。
+  function serverFilesOf(code) {
+    var config = materialConfig(code);
+    return (config && config.existing_files) ? config.existing_files : [];
+  }
+
   function filesOf(code) {
     var pond = ponds[code];
-    if (!pond) {
-      return [];
-    }
-    return pond.getFiles().map(function (item) {
+    var sessionFiles = pond ? pond.getFiles().map(function (item) {
       var native = item.file || null;
       return {
         name: item.filename || (native && native.name) || '未命名文件',
@@ -831,11 +941,24 @@
         native: native,
         ext: extOf(item.filename || (native && native.name))
       };
+    }) : [];
+    var serverFiles = serverFilesOf(code).map(function (file) {
+      return {
+        name: file.name,
+        size: 0,
+        size_display: file.size_display,
+        native: null,
+        ext: extOf(file.name),
+        server: true
+      };
     });
+    return serverFiles.concat(sessionFiles);
   }
 
   function countOf(code) {
-    return ponds[code] ? ponds[code].getFiles().length : 0;
+    var pond = ponds[code];
+    var sessionCount = pond ? pond.getFiles().length : 0;
+    return (uploadedCounts[code] || 0) + sessionCount;
   }
 
   function materialConfig(code) {
@@ -940,7 +1063,9 @@
                 : '<span class="avatar avatar-sm bg-secondary-lt">' + escapeHtml(file.ext.replace('.', '').toUpperCase() || '文件') + '</span>';
               return '<div class="d-flex align-items-center gap-2 mb-2">' + thumb +
                 '<div class="text-truncate"><div class="text-truncate">' + escapeHtml(file.name) + '</div>' +
-                '<div class="text-secondary small">' + formatBytes(file.size) + '</div></div></div>';
+                '<div class="text-secondary small">' +
+                escapeHtml(file.server ? (file.size_display || '已上传') : formatBytes(file.size)) +
+                '</div></div></div>';
             }).join('')
           : '<div class="text-secondary small">未上传</div>';
         card.innerHTML = '<div class="card h-100"><div class="card-body">' +
@@ -984,6 +1109,67 @@
     });
   }
 
+  /* ------------------------------------------------------------------
+   * 提交前先保存草稿
+   * 提交接口（POST .../submit/）只接收 request_key，服务端要求 draft_data 非空，
+   * 否则返回「提交材料不能为空」。向导此前从不保存表单，任何新申报都会卡在这里。
+   * 顺序：GET 取版本号 -> PATCH 写入 Step1/Step2 -> POST 提交。
+   * ------------------------------------------------------------------ */
+  function buildDraftPayload() {
+    return {
+      project_name: fieldProjectName.value.trim(),
+      category: '',
+      declaration_type: isTeamMode() ? 'team' : 'individual',
+      team_members: isTeamMode() ? collectMembers() : [],
+      advisor_name: fieldAdvisor.value.trim(),
+      practice_place: fieldPlace.value.trim(),
+      date_start: fieldDateStart.value,
+      date_end: fieldDateEnd.value,
+      project_intro: fieldIntro.value.trim()
+    };
+  }
+
+  function persistDraft() {
+    if (!DETAIL_URL) {
+      return Promise.reject(new Error('缺少申报记录地址，请刷新页面后重试。'));
+    }
+    return fetch(DETAIL_URL, {
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    })
+      .then(function (resp) {
+        return resp.json().catch(function () { return {}; }).then(function (data) {
+          if (!resp.ok) {
+            throw new Error((data && data.error && data.error.message) || ('读取申报状态失败（HTTP ' + resp.status + '）'));
+          }
+          return data;
+        });
+      })
+      .then(function (current) {
+        return fetch(DETAIL_URL, {
+          method: 'PATCH',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': CSRF_TOKEN,
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: JSON.stringify({
+            expected_version: current.version,
+            draft_data: buildDraftPayload()
+          })
+        });
+      })
+      .then(function (resp) {
+        return resp.json().catch(function () { return {}; }).then(function (data) {
+          if (!resp.ok) {
+            throw new Error((data && data.error && data.error.message) || ('保存表单失败（HTTP ' + resp.status + '）'));
+          }
+          return data;
+        });
+      });
+  }
+
   var btnSubmit = document.getElementById('btn-confirm-submit');
 
   function submitApplication() {
@@ -998,23 +1184,6 @@
     hideSubmitError();
     btnSubmit.disabled = true;
     btnSubmit.classList.add('btn-loading');
-
-    // 把第 1、2 步填的项目信息随提交一起带上：服务端先落草稿再提交，
-    // 避免只发 request_key 导致「已填内容未保存 -> 提交报材料为空」。
-    var submitPayload = {
-      request_key: uuid4(),
-      draft_data: collectDraftPayload()
-    };
-    fetch(SUBMIT_URL, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRFToken': CSRF_TOKEN,
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      body: JSON.stringify(submitPayload)
-    })
       .then(function (resp) {
         return resp.json().catch(function () { return {}; }).then(function (data) {
           return { ok: resp.ok, status: resp.status, data: data };
@@ -1043,10 +1212,57 @@
   }
 
   /* ------------------------------------------------------------------
+   * 已上传文件管理：删除后立刻把名额还回去
+   * ------------------------------------------------------------------ */
+  function bindDeleteButtons() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-delete-upload]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var uploadId = btn.getAttribute('data-delete-upload');
+        var code = btn.getAttribute('data-material-code');
+        var config = materialConfig(code);
+        btn.disabled = true;
+        fetch('/api/v1/uploads/' + encodeURIComponent(uploadId) + '/delete/', {
+          method: 'DELETE',
+          credentials: 'same-origin',
+          headers: { 'X-CSRFToken': CSRF_TOKEN, 'X-Requested-With': 'XMLHttpRequest' }
+        })
+          .then(function (resp) {
+            return resp.json().catch(function () { return {}; }).then(function (data) {
+              if (!resp.ok) {
+                throw new Error((data && data.error && data.error.message) || ('删除失败（HTTP ' + resp.status + '）'));
+              }
+              return data;
+            });
+          })
+          .then(function () {
+            var row = btn.closest('li');
+            if (row) {
+              row.remove();
+            }
+            if (config) {
+              uploadedCounts[code] = Math.max(0, (uploadedCounts[code] || 1) - 1);
+              refreshZoneLimit(config);
+              clearUploadError(config);
+            }
+            var wrap = document.querySelector('[data-existing-files="' + code + '"]');
+            if (wrap && !wrap.querySelectorAll('li').length) {
+              wrap.classList.add('d-none');
+            }
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            window.alert(err && err.message ? err.message : '删除失败，请稍后重试。');
+          });
+      });
+    });
+  }
+
+  /* ------------------------------------------------------------------
    * 启动
    * ------------------------------------------------------------------ */
   applyDeclarationMode();
   initFilePonds();
+  bindDeleteButtons();
   refreshDateSpan();
 
   // 支持 #step-3 这类深链直接落位（步骤条本身也可点击切换）

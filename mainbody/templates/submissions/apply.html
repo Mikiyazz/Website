@@ -222,6 +222,23 @@
               <div class="mb-2 text-secondary small">
                 {{ material.count_hint }} · 允许 {{ material.allowed_extensions|join:" / " }}
               </div>
+              {% if material.existing_files %}
+              <div class="mb-2" data-existing-files="{{ material.code }}">
+                <div class="small text-secondary mb-1">
+                  已上传 <strong data-uploaded-count="{{ material.code }}">{{ material.uploaded_count }}</strong>
+                  / 最多 {{ material.max_count }} 份 · 如需更换请先删除
+                </div>
+                <ul class="list-unstyled mb-0 small">
+                  {% for f in material.existing_files %}
+                  <li class="d-flex align-items-center justify-content-between gap-2 py-1 border-bottom">
+                    <span class="text-truncate">{{ f.name }}<span class="text-secondary ms-1">（{{ f.size_display }}）</span></span>
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2"
+                            data-delete-upload="{{ f.id }}" data-material-code="{{ material.code }}">删除</button>
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
               <input type="file"
                      class="filepond-zone"
                      id="pond-{{ material.code }}"
@@ -236,6 +253,7 @@
                 {% if material.code == "other_materials" %}选交，最多 10 份（其中 ZIP 打包材料最多 5 份）；普通材料单份 ≤ 50MB，ZIP 打包材料单份 ≤ 2000MB。{% endif %}
                 {% if material.code == "news_document" %}选交，仅接受 .docx 新闻稿，单份 ≤ 20MB；提交后仍可替换，审核在「我的新闻稿」独立页面进行。{% endif %}
               </div>
+              <div class="small text-danger mt-1 d-none" data-upload-error="{{ material.code }}"></div>
             </div>
           </div>
         </div>
