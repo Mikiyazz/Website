@@ -1,6 +1,8 @@
 """Export services: Excel summary generation and streaming class-based ZIP packaging."""
+from datetime import timedelta
 from pathlib import Path
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -9,13 +11,20 @@ import uuid
 import zipfile
 import openpyxl
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from apps.accounts.models import User
 from apps.accounts.permissions import (
+    build_class_scope_q,
+    format_class_scope_label,
+    format_user_class_label,
     is_college_admin,
     is_reviewer,
-    reviewer_allowed_class_names,
+    parse_class_filter,
+    reviewer_allowed_class_labels,
+    reviewer_allowed_class_scopes,
     reviewer_user_scope_q,
+    scope_matches_class_filter,
 )
 from apps.activities.models import Activity
 from apps.audit.services import record
@@ -23,7 +32,12 @@ from apps.common.errors import DomainError, Forbidden
 from apps.submissions.models import Submission
 from apps.uploads.models import UploadSession
 from apps.uploads.policies import SINGLE_FILE_MATERIAL_CODES, STANDARD_MATERIAL_CODES, STANDARD_MATERIAL_RULES
-from apps.uploads.services import STREAM_CHUNK_BYTES, map_uploads_by_submission, resolve_file_disk_path
+from apps.uploads.services import (
+    STREAM_CHUNK_BYTES,
+    ensure_disk_space_available,
+    map_uploads_by_submission,
+    resolve_file_disk_path,
+)
 from .models import ExportJob
 
 EXCEL_HEADERS = ["学号", "姓名", "班级", "项目名", "类别", "审核状态"]
@@ -62,8 +76,15 @@ def _parse_activity_uuid(activity_id) -> uuid.UUID:
         raise DomainError("activity_id 必须为有效 UUID。") from None
 
 
-def require_export_permission(actor, activity: Activity, class_name: str | None = None) -> list[str] | None:
-    """Verify actor is college_admin or reviewer; return allowed class list or None if unrestricted."""
+def require_export_permission(
+    actor,
+    activity: Activity,
+    class_name: str | None = None,
+    *,
+    grade: str | None = None,
+    major: str | None = None,
+) -> list[str] | None:
+    """Verify actor is college_admin or reviewer; return allowed class labels or None if unrestricted."""
     if not actor or not actor.is_authenticated or not actor.is_active:
         raise Forbidden("请先登录。")
 
@@ -71,14 +92,14 @@ def require_export_permission(actor, activity: Activity, class_name: str | None 
         return None
 
     if is_reviewer(actor):
-        allowed_classes = reviewer_allowed_class_names(actor, activity_id=activity.id)
-        if not allowed_classes:
+        allowed_scopes = reviewer_allowed_class_scopes(actor, activity_id=activity.id)
+        if not allowed_scopes:
             raise Forbidden("当前账号尚未绑定负责班级，无法导出申报材料。")
-        if class_name is not None and str(class_name).strip() != "":
-            target_cls = str(class_name).strip()
-            if target_cls not in allowed_classes:
+        parsed_filter = parse_class_filter(class_name, grade=grade, major=major)
+        if parsed_filter["class_name"] or parsed_filter["grade"] or parsed_filter["major"]:
+            if not any(scope_matches_class_filter(scope, parsed_filter) for scope in allowed_scopes):
                 raise Forbidden("您无权导出该班级的申报材料。")
-        return allowed_classes
+        return reviewer_allowed_class_labels(actor, activity_id=activity.id)
 
     raise Forbidden("仅限管理员或审核人员访问导出功能。")
 
@@ -115,6 +136,8 @@ def build_filtered_submissions_queryset(
     actor,
     activity: Activity,
     class_name: str | None = None,
+    grade: str | None = None,
+    major: str | None = None,
     status: str | None = None,
     category: str | None = None,
     declaration_type: str | None = None,
@@ -124,8 +147,16 @@ def build_filtered_submissions_queryset(
     from apps.submissions.services import redundant_member_draft_ids
 
     normalized_class = str(class_name).strip() if class_name is not None and str(class_name).strip() else None
+    normalized_grade = str(grade).strip() if grade is not None and str(grade).strip() else None
+    normalized_major = str(major).strip() if major is not None and str(major).strip() else None
     normalized_category = str(category).strip() if category is not None and str(category).strip() else None
-    allowed_classes = require_export_permission(actor, activity, class_name=normalized_class)
+    require_export_permission(
+        actor,
+        activity,
+        class_name=normalized_class,
+        grade=normalized_grade,
+        major=normalized_major,
+    )
     resolved_status = resolve_status_filter(status)
 
     qs = Submission.objects.filter(activity=activity).select_related("owner")
@@ -134,10 +165,14 @@ def build_filtered_submissions_queryset(
         qs = qs.exclude(pk__in=redundant_ids)
     if not is_college_admin(actor):
         qs = qs.filter(reviewer_user_scope_q(actor, prefix="owner__", activity_id=activity.id))
-    elif allowed_classes is not None:
-        qs = qs.filter(owner__class_name__in=allowed_classes)
-    if normalized_class is not None:
-        qs = qs.filter(owner__class_name=normalized_class)
+    class_q = build_class_scope_q(
+        normalized_class,
+        prefix="owner__",
+        grade=normalized_grade,
+        major=normalized_major,
+    )
+    if class_q:
+        qs = qs.filter(class_q)
     if resolved_status is not None:
         qs = qs.filter(status=resolved_status)
     if normalized_category is not None:
@@ -146,22 +181,24 @@ def build_filtered_submissions_queryset(
     if decl_q is not None:
         qs = qs.filter(decl_q)
 
-    return qs.order_by("owner__class_name", "owner__username", "created_at")
+    return qs.order_by("owner__grade", "owner__major", "owner__class_name", "owner__username", "created_at")
 
 
 def list_activity_declared_classes(*, actor, activity_id) -> list[str]:
-    """Return sorted distinct class names that have submissions under the given activity."""
+    """Return sorted distinct exact class labels (grade + major + class_name) with submissions under the activity."""
     act_uuid = _parse_activity_uuid(activity_id)
     activity = Activity.objects.get(pk=act_uuid)
-    allowed_classes = require_export_permission(actor, activity)
+    require_export_permission(actor, activity)
 
     qs = Submission.objects.filter(activity=activity).exclude(owner__class_name="")
     if not is_college_admin(actor):
         qs = qs.filter(reviewer_user_scope_q(actor, prefix="owner__", activity_id=activity.id))
-    elif allowed_classes is not None:
-        qs = qs.filter(owner__class_name__in=allowed_classes)
 
-    return list(qs.order_by("owner__class_name").values_list("owner__class_name", flat=True).distinct())
+    labels = {
+        format_class_scope_label(g, m, c)
+        for g, m, c in qs.values_list("owner__grade", "owner__major", "owner__class_name").distinct()
+    }
+    return sorted(lbl for lbl in labels if lbl)
 
 
 def generate_activity_excel_workbook(
@@ -169,6 +206,8 @@ def generate_activity_excel_workbook(
     actor,
     activity_id,
     class_name: str | None = None,
+    grade: str | None = None,
+    major: str | None = None,
     status: str | None = None,
     category: str | None = None,
     declaration_type: str | None = None,
@@ -180,6 +219,8 @@ def generate_activity_excel_workbook(
         actor=actor,
         activity=activity,
         class_name=class_name,
+        grade=grade,
+        major=major,
         status=status,
         category=category,
         declaration_type=declaration_type,
@@ -193,7 +234,7 @@ def generate_activity_excel_workbook(
     for sub in qs.iterator(chunk_size=500):
         student_number = sub.owner.username or ""
         real_name = sub.owner.real_name or ""
-        student_class = sub.owner.class_name or ""
+        student_class = format_user_class_label(sub.owner)
         project_name, category = extract_submission_project_info(sub)
         status_label = STATUS_DISPLAY_MAP.get(sub.status, sub.get_status_display())
         ws.append([
@@ -213,6 +254,8 @@ def export_activity_excel_stream(
     actor,
     activity_id,
     class_name: str | None = None,
+    grade: str | None = None,
+    major: str | None = None,
     status: str | None = None,
     category: str | None = None,
     declaration_type: str | None = None,
@@ -222,6 +265,8 @@ def export_activity_excel_stream(
         actor=actor,
         activity_id=activity_id,
         class_name=class_name,
+        grade=grade,
+        major=major,
         status=status,
         category=category,
         declaration_type=declaration_type,
@@ -232,8 +277,10 @@ def export_activity_excel_stream(
     tmp_file.seek(0)
 
     clean_title = sanitize_filename(activity.title, default="活动")
-    if class_name and str(class_name).strip():
-        clean_cls = sanitize_filename(str(class_name).strip(), default="班级")
+    parsed_cls = parse_class_filter(class_name, grade=grade, major=major)
+    cls_label = format_class_scope_label(parsed_cls["grade"], parsed_cls["major"], parsed_cls["class_name"])
+    if cls_label:
+        clean_cls = sanitize_filename(cls_label, default="班级")
         filename = f"{clean_title}-{clean_cls}-汇总表.xlsx"
     else:
         filename = f"{clean_title}-汇总表.xlsx"
@@ -244,7 +291,7 @@ def export_activity_excel_stream(
         status="done",
         filters={
             "type": "excel",
-            "class_name": str(class_name or "").strip(),
+            "class_name": cls_label,
             "status": str(status or "").strip(),
         },
         result_key=filename,
@@ -254,7 +301,7 @@ def export_activity_excel_stream(
         actor=actor,
         action="export.excel.downloaded",
         target=job,
-        metadata={"activity_id": str(activity.id), "class_name": str(class_name or "").strip(), "status": str(status or "").strip()},
+        metadata={"activity_id": str(activity.id), "class_name": cls_label, "status": str(status or "").strip()},
     )
     return tmp_file, filename
 
@@ -276,13 +323,16 @@ def export_class_zip_stream(
     actor,
     activity_id,
     class_name: str,
+    grade: str | None = None,
+    major: str | None = None,
     status: str | None = None,
     category: str | None = None,
     declaration_type: str | None = None,
 ):
     """Stream all submissions and attachments of a class into a temporary ZIP file on disk."""
     act_uuid = _parse_activity_uuid(activity_id)
-    normalized_class = str(class_name or "").strip()
+    parsed_cls = parse_class_filter(class_name, grade=grade, major=major)
+    normalized_class = format_class_scope_label(parsed_cls["grade"], parsed_cls["major"], parsed_cls["class_name"])
     if not normalized_class:
         raise DomainError("缺少必要参数 class_name。")
 
@@ -291,7 +341,9 @@ def export_class_zip_stream(
         build_filtered_submissions_queryset(
             actor=actor,
             activity=activity,
-            class_name=normalized_class,
+            class_name=parsed_cls["class_name"],
+            grade=parsed_cls["grade"],
+            major=parsed_cls["major"],
             status=status,
             category=category,
             declaration_type=declaration_type,
@@ -301,12 +353,16 @@ def export_class_zip_stream(
     uploads_by_submission = map_uploads_by_submission(submissions, activity=activity)
 
     clean_class_dir = sanitize_filename(normalized_class, default="未分班")
+    ensure_disk_space_available(target_dir=Path(tempfile.gettempdir()))
     tmp_file = tempfile.TemporaryFile(suffix=".zip")
     used_arcnames: set[str] = set()
 
-    with zipfile.ZipFile(tmp_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(tmp_file, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for sub in submissions:
-            clean_student_class = sanitize_filename(sub.owner.class_name or normalized_class, default=clean_class_dir)
+            clean_student_class = sanitize_filename(
+                format_user_class_label(sub.owner) or normalized_class,
+                default=clean_class_dir,
+            )
             clean_name = sanitize_filename(sub.owner.real_name or sub.owner.username, default="未知姓名")
             clean_sn = sanitize_filename(sub.owner.username, default="未知学号")
             raw_project_name, _ = extract_submission_project_info(sub)
@@ -347,7 +403,18 @@ def export_class_zip_stream(
                             arcname = f"{student_folder}/{stem}_{dedup_idx}{suffix}"
                     used_arcnames.add(arcname)
 
-                    with open(disk_path, "rb") as src_stream, zf.open(arcname, "w") as dst_stream:
+                    try:
+                        file_size = disk_path.stat().st_size
+                    except OSError:
+                        continue
+                    info = zipfile.ZipInfo.from_file(disk_path, arcname)
+                    info.compress_type = (
+                        zipfile.ZIP_STORED
+                        if file_size >= EXPORT_STORED_THRESHOLD_BYTES
+                        else zipfile.ZIP_DEFLATED
+                    )
+                    info.flag_bits |= 0x800  # UTF-8 file name flag
+                    with open(disk_path, "rb") as src_stream, zf.open(info, "w") as dst_stream:
                         shutil.copyfileobj(src_stream, dst_stream, length=STREAM_CHUNK_BYTES)
 
     tmp_file.seek(0)
@@ -389,6 +456,8 @@ EXPORT_ROOT_DIRNAME = "exports"
 EXPORT_STORED_THRESHOLD_BYTES = 20 * 1024 * 1024
 EXPORT_PROGRESS_FLUSH_BYTES = 4 * 1024 * 1024
 EXPORT_PROGRESS_FLUSH_SECONDS = 0.5
+EXPORT_STALE_ACTIVE_HOURS = 2
+DEFAULT_EXPORT_RETENTION_HOURS = 72
 
 EXPORT_MODE_DECLARATION_ONLY = "declaration_only"
 EXPORT_MODE_DECLARATION_AND_OUTCOMES = "declaration_and_outcomes"
@@ -496,8 +565,17 @@ def build_export_entries(*, activity: Activity, allowed_classes=None, mode: str 
 
     submissions = list(qs)
     if allowed_classes is not None:
-        allowed = {str(item).strip() for item in allowed_classes if str(item).strip()}
-        submissions = [sub for sub in submissions if str(sub.owner.class_name or "").strip() in allowed]
+        allowed_parsed = [parse_class_filter(str(item)) for item in allowed_classes if str(item).strip()]
+        filtered_subs = []
+        for sub in submissions:
+            owner_scope = {
+                "grade": str(sub.owner.grade or "").strip(),
+                "major": str(sub.owner.major or "").strip(),
+                "class_name": str(sub.owner.class_name or "").strip(),
+            }
+            if any(scope_matches_class_filter(owner_scope, item) for item in allowed_parsed):
+                filtered_subs.append(sub)
+        submissions = filtered_subs
 
     uploads_by_submission = map_uploads_by_submission(submissions, activity=activity)
 
@@ -632,8 +710,20 @@ def _write_zip_entry(zf: zipfile.ZipFile, entry: dict, progress: _ExportProgress
             progress.add(len(chunk))
 
 
-def create_activity_export_job(*, actor, activity_id, mode: str | None = None) -> ExportJob:
-    """Create a pending ExportJob after permission checks; celery task owns the heavy lifting."""
+def _export_retention_hours() -> int:
+    raw = getattr(settings, "EXPORT_RETENTION_HOURS", DEFAULT_EXPORT_RETENTION_HOURS)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_EXPORT_RETENTION_HOURS
+
+
+def get_or_create_activity_export_job(*, actor, activity_id, mode: str | None = None) -> tuple[ExportJob, bool]:
+    """Return an existing in-flight ExportJob for the same actor/activity/mode, or create a new PENDING one.
+
+    Serializes rapid duplicate clicks per actor via SELECT FOR UPDATE so 5 consecutive clicks only create
+    1 ExportJob and dispatch 1 Celery task.
+    """
     try:
         activity = Activity.objects.get(pk=_parse_activity_uuid(activity_id))
     except Activity.DoesNotExist:
@@ -641,34 +731,70 @@ def create_activity_export_job(*, actor, activity_id, mode: str | None = None) -
     allowed_classes = require_export_permission(actor, activity)
     resolved_mode = normalize_export_mode(mode)
     mode_label = EXPORT_MODE_LABELS[resolved_mode]
-    job = ExportJob.objects.create(
-        requested_by=actor,
-        activity=activity,
-        status=ExportJob.Status.PENDING,
-        filters={
-            "type": "activity_zip",
-            "mode": resolved_mode,
-            "mode_label": mode_label,
-            "classes": list(allowed_classes or []),
-            "scope": "activity",
-        },
-    )
-    record(
-        actor=actor,
-        action="export.activity.started",
-        target=job,
-        metadata={
-            "activity_id": str(activity.id),
-            "job_id": str(job.id),
-            "mode": resolved_mode,
-            "classes": list(allowed_classes or []),
-        },
-    )
+
+    with transaction.atomic():
+        User.objects.select_for_update().get(pk=actor.pk)
+        now = timezone.now()
+        stale_cutoff = now - timedelta(hours=EXPORT_STALE_ACTIVE_HOURS)
+        active_jobs = list(
+            ExportJob.objects.select_for_update()
+            .filter(
+                requested_by=actor,
+                activity=activity,
+                status__in=(ExportJob.Status.PENDING, ExportJob.Status.RUNNING),
+            )
+            .order_by("-created_at")
+        )
+        for existing in active_jobs:
+            existing_filters = existing.filters or {}
+            if existing_filters.get("type") not in ("activity_zip", None, ""):
+                continue
+            if existing.export_mode != resolved_mode:
+                continue
+            if existing.updated_at and existing.updated_at < stale_cutoff:
+                ExportJob.objects.filter(pk=existing.pk).update(
+                    status=ExportJob.Status.FAILED,
+                    error_code="stale_timeout",
+                    finished_at=now,
+                    updated_at=now,
+                )
+                continue
+            return existing, False
+
+        job = ExportJob.objects.create(
+            requested_by=actor,
+            activity=activity,
+            status=ExportJob.Status.PENDING,
+            filters={
+                "type": "activity_zip",
+                "mode": resolved_mode,
+                "mode_label": mode_label,
+                "classes": list(allowed_classes or []),
+                "scope": "activity",
+            },
+        )
+        record(
+            actor=actor,
+            action="export.activity.started",
+            target=job,
+            metadata={
+                "activity_id": str(activity.id),
+                "job_id": str(job.id),
+                "mode": resolved_mode,
+                "classes": list(allowed_classes or []),
+            },
+        )
+        return job, True
+
+
+def create_activity_export_job(*, actor, activity_id, mode: str | None = None) -> ExportJob:
+    """Create (or reuse active) ExportJob after permission checks; celery task owns the heavy lifting."""
+    job, _ = get_or_create_activity_export_job(actor=actor, activity_id=activity_id, mode=mode)
     return job
 
 
 def run_activity_export_job(job_id) -> ExportJob:
-    """Build MEDIA_ROOT/exports/{activity_id}/{uuid}.zip with DB-backed progress."""
+    """Build MEDIA_ROOT/exports/{activity_id}/{uuid}.zip with DB-backed progress and atomic cleanup on error."""
     job = ExportJob.objects.select_related("activity", "requested_by").get(pk=job_id)
     activity = job.activity
     now = timezone.now()
@@ -676,6 +802,8 @@ def run_activity_export_job(job_id) -> ExportJob:
         status=ExportJob.Status.RUNNING, started_at=now, total=0, current=0, updated_at=now
     )
 
+    tmp_zip_path: Path | None = None
+    zip_path: Path | None = None
     try:
         filters = dict(job.filters or {})
         raw_classes = filters.get("classes")
@@ -707,19 +835,25 @@ def run_activity_export_job(job_id) -> ExportJob:
         )
 
         export_dir = export_absolute_dir(activity.id)
+        ensure_disk_space_available(required_bytes=total_bytes, target_dir=export_dir)
+
         zip_name = f"{uuid.uuid4().hex}.zip"
+        tmp_zip_path = export_dir / f".{zip_name}.part"
         zip_path = export_dir / zip_name
         relative_path = f"{export_relative_dir(activity.id)}/{zip_name}"
 
         progress = _ExportProgress(job.pk, total_bytes)
-        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        with zipfile.ZipFile(tmp_zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
             for entry in entries:
                 _write_zip_entry(zf, entry, progress)
+        os.replace(tmp_zip_path, zip_path)
+        tmp_zip_path = None
         progress.flush()
 
         download_name = sanitize_filename(activity.title, default="活动")
         archive_suffix = EXPORT_MODE_ARCHIVE_SUFFIX.get(resolved_mode, "归档材料")
         finished = timezone.now()
+        expires_at = finished + timedelta(hours=_export_retention_hours())
         ExportJob.objects.filter(pk=job.pk).update(
             status=ExportJob.Status.DONE,
             file_path=relative_path,
@@ -727,6 +861,7 @@ def run_activity_export_job(job_id) -> ExportJob:
             current=total_bytes,
             total=total_bytes,
             finished_at=finished,
+            expires_at=expires_at,
             error_code="",
             updated_at=finished,
         )
@@ -741,13 +876,24 @@ def run_activity_export_job(job_id) -> ExportJob:
                 "file_count": len(entries),
                 "total_bytes": total_bytes,
                 "file_path": relative_path,
+                "expires_at": expires_at.isoformat(),
             },
         )
-    except Exception as exc:  # noqa: BLE001 - 任务失败也必须落库，页面才能显示原因
+    except Exception as exc:  # noqa: BLE001 - 任务失败也必须落库并清理半成品 ZIP，绝不残留大文件
+        for candidate in (tmp_zip_path, zip_path):
+            if candidate is not None:
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    logging.getLogger(__name__).warning(
+                        "export_partial_cleanup_failed",
+                        extra={"job_id": str(job.pk), "path": str(candidate)},
+                    )
         logging.getLogger(__name__).exception("export_activity_failed", extra={"job_id": str(job.pk)})
         failed_at = timezone.now()
         ExportJob.objects.filter(pk=job.pk).update(
             status=ExportJob.Status.FAILED,
+            file_path="",
             error_code=type(exc).__name__[:100],
             finished_at=failed_at,
             updated_at=failed_at,

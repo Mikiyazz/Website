@@ -389,12 +389,13 @@ def test_apply_page_exposes_zip_count_cap(client, student, activity):
     assert "ZIP 最多 5 份" in html
 
     payload = re.search(
-        r'<script type="application/json" id="wizard-materials-json">(.*?)</script>',
+        r'<script[^>]*id="wizard-materials-json"[^>]*type="application/json"[^>]*>(.*?)</script>'
+        r'|<script[^>]*type="application/json"[^>]*id="wizard-materials-json"[^>]*>(.*?)</script>',
         html,
         re.S,
     )
     assert payload is not None
-    materials = json.loads(payload.group(1))
+    materials = json.loads(payload.group(1) or payload.group(2))
     proof = next(item for item in materials if item["code"] == "other_materials")
     assert proof["extension_count_limits"] == [{"ext": ".zip", "max_count": 5}]
     assert proof["extension_limits"] == [{"ext": ".zip", "max_mb": 2000}]
@@ -505,7 +506,13 @@ def test_apply_page_prefills_draft_shows_returned_reason_and_delete_controls(cli
     assert 'value="2026-07-05"' in html
     assert 'value="2026-07-15"' in html
     assert "开展老年防诈骗宣讲与数字技能指导。" in html
-    assert "赵队员" in html
+    team_payload = re.search(
+        r'<script[^>]*id="wizard-team-json"[^>]*type="application/json"[^>]*>(.*?)</script>',
+        html,
+        re.S,
+    )
+    assert team_payload is not None
+    assert any(m.get("real_name") == "赵队员" for m in json.loads(team_payload.group(1)))
     assert 'id="returned-alert-banner"' in html
     assert "请补充团队旗帜合影并核对指导老师职称。" in html
     assert 'id="apply-review-history"' in html

@@ -3,7 +3,7 @@ from urllib.parse import quote
 from django.http import FileResponse, JsonResponse
 from apps.accounts.models import User
 from apps.accounts.permissions import is_college_admin
-from apps.common.api import endpoint, json_body
+from apps.common.api import build_media_download_response, endpoint, json_body
 from apps.common.errors import DomainError, Forbidden
 from .services import (
     export_activity_excel_stream,
@@ -43,6 +43,8 @@ def _build_attachment_response(file_handle, filename: str, content_type: str) ->
 @endpoint("GET")
 def export_activity_excel_view(request, activity_id):
     class_name = request.GET.get("class_name") or request.GET.get("class")
+    grade = request.GET.get("grade")
+    major = request.GET.get("major")
     status = request.GET.get("status")
     category = request.GET.get("category")
     declaration_type = request.GET.get("declaration_type")
@@ -50,6 +52,8 @@ def export_activity_excel_view(request, activity_id):
         actor=request.user,
         activity_id=activity_id,
         class_name=class_name,
+        grade=grade,
+        major=major,
         status=status,
         category=category,
         declaration_type=declaration_type,
@@ -80,6 +84,8 @@ def activity_classes_view(request, activity_id):
 @endpoint("GET")
 def export_activity_class_zip_view(request, activity_id):
     class_name = request.GET.get("class_name") or request.GET.get("class")
+    grade = request.GET.get("grade")
+    major = request.GET.get("major")
     status = request.GET.get("status")
     category = request.GET.get("category")
     declaration_type = request.GET.get("declaration_type")
@@ -87,6 +93,8 @@ def export_activity_class_zip_view(request, activity_id):
         actor=request.user,
         activity_id=activity_id,
         class_name=class_name,
+        grade=grade,
+        major=major,
         status=status,
         category=category,
         declaration_type=declaration_type,
@@ -124,7 +132,7 @@ def list_export_jobs_for_user(user, *, limit: int = 12):
 @endpoint("POST")
 def start_export(request):
     from .models import ExportJob
-    from .services import create_activity_export_job, serialize_export_job
+    from .services import get_or_create_activity_export_job, serialize_export_job
     from .tasks import export_activity_submissions
 
     _require_export_role(request.user)
@@ -134,17 +142,21 @@ def start_export(request):
         raise DomainError("缺少必要参数：activity_id。")
     mode = data.get("mode")
 
-    job = create_activity_export_job(actor=request.user, activity_id=activity_id, mode=mode)
-    try:
-        export_activity_submissions.delay(str(job.activity_id), str(request.user.pk), str(job.pk))
-    except Exception as exc:  # noqa: BLE001 - broker 不可用要落库，页面才能提示重试
-        ExportJob.objects.filter(pk=job.pk).update(
-            status=ExportJob.Status.FAILED, error_code=type(exc).__name__[:100]
-        )
-        raise DomainError("导出任务派发失败，请稍后重试。") from None
+    job, created = get_or_create_activity_export_job(actor=request.user, activity_id=activity_id, mode=mode)
+    if created:
+        try:
+            export_activity_submissions.delay(str(job.activity_id), str(request.user.pk), str(job.pk))
+        except Exception as exc:  # noqa: BLE001 - broker 不可用要落库，页面才能提示重试
+            ExportJob.objects.filter(pk=job.pk).update(
+                status=ExportJob.Status.FAILED, error_code=type(exc).__name__[:100]
+            )
+            raise DomainError("导出任务派发失败，请稍后重试。") from None
 
     job.refresh_from_db()
-    return JsonResponse({"job": serialize_export_job(job), "job_id": str(job.id)}, status=202)
+    return JsonResponse(
+        {"job": serialize_export_job(job), "job_id": str(job.id), "reused": not created},
+        status=202,
+    )
 
 
 @endpoint("GET")
@@ -184,4 +196,9 @@ def download_export(request, job_id):
         raise DomainError("导出文件已失效，请重新发起导出。")
 
     filename = job.result_key or f"{job.activity.title}-归档材料.zip"
-    return FileResponse(open(target, "rb"), as_attachment=True, filename=filename, content_type="application/zip")
+    return build_media_download_response(
+        target,
+        filename=filename,
+        content_type="application/zip",
+        inline=False,
+    )

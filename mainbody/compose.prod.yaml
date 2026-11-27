@@ -1,0 +1,40 @@
+# 矿大校内 Linux 服务器生产覆盖配置：
+# 将 postgres_data、media_data 与 redis_data 明确绑定到宿主机大容量数据盘目录，
+# 避免占用根分区（/var/lib/docker）并在换机/重建容器时实现物理级数据隔离与定时备份。
+#
+# 启动前先在宿主机创建数据盘目录并赋权：
+#   sudo mkdir -p /data/practice-platform/{postgres,media,redis,certs,backups}
+#   sudo chown -R 10001:10001 /data/practice-platform/media
+#
+# 启动命令：
+#   docker compose -f compose.yaml -f compose.prod.yaml --profile setup run --rm migrate
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d
+
+services:
+  nginx:
+    ports:
+      - "${WEB_BIND_HOST:-0.0.0.0}:${WEB_PORT:-80}:80"
+      # 使用 deploy/nginx.https.conf 独立 HTTPS 证书时取消下一行注释并挂载证书目录：
+      # - "${WEB_BIND_HOST:-0.0.0.0}:443:443"
+    # volumes:
+    #   - "${DATA_ROOT:-/data/practice-platform}/certs:/etc/nginx/certs:ro"
+
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${DATA_ROOT:-/data/practice-platform}/postgres"
+  media_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${DATA_ROOT:-/data/practice-platform}/media"
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${DATA_ROOT:-/data/practice-platform}/redis"

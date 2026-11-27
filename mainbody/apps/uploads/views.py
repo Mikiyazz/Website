@@ -1,8 +1,7 @@
-from urllib.parse import quote
-from django.http import FileResponse, JsonResponse
+from django.http import JsonResponse
 from apps.accounts.permissions import require_student
 from apps.audit.decorators import audit_rejections
-from apps.common.api import endpoint
+from apps.common.api import build_media_download_response, endpoint
 from apps.common.errors import DomainError, FeatureUnavailable
 from integrations.storage import get_storage
 from .chunks import (
@@ -214,20 +213,14 @@ def file_access_view(request, upload_id):
     ext = "." + upload.original_name.rsplit(".", 1)[-1].lower() if "." in upload.original_name else ""
     inline_requested = str(request.GET.get("inline", "")).strip().lower() in ("1", "true", "yes")
     can_inline = ext in INLINE_PREVIEW_EXTENSIONS and inline_requested
-    as_attachment = not can_inline
     content_type = EXTENSION_CONTENT_TYPES.get(ext, asset.detected_type or "application/octet-stream")
 
-    response = FileResponse(
-        open(disk_path, "rb"),
-        as_attachment=as_attachment,
+    return build_media_download_response(
+        disk_path,
         filename=upload.original_name,
         content_type=content_type,
+        inline=can_inline,
     )
-    disposition_type = "inline" if can_inline else "attachment"
-    encoded_name = quote(upload.original_name)
-    if not response.headers.get("Content-Disposition", "").lower().startswith(disposition_type):
-        response["Content-Disposition"] = f"{disposition_type}; filename*=UTF-8''{encoded_name}"
-    return response
 
 
 @endpoint("DELETE", "POST")

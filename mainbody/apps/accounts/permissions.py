@@ -6,7 +6,7 @@ from django.shortcuts import redirect
 
 from apps.common.errors import Forbidden
 
-from .models import User
+from .models import GRADE_RE, User
 
 
 STUDENT_ELIGIBLE_ROLES = frozenset({User.Role.STUDENT, User.Role.REVIEWER, User.Role.ADMIN, "grad_student"})
@@ -36,15 +36,117 @@ def is_reviewer(user):
     )
 
 
+def format_class_scope_label(grade: str = "", major: str = "", class_name: str = "") -> str:
+    """将 (grade, major, class_name) 格式化为统一班级展示文本（空项自动省略，兼容无年级/专业旧数据）。"""
+    parts = [
+        part
+        for part in (
+            str(grade or "").strip(),
+            str(major or "").strip(),
+            str(class_name or "").strip(),
+        )
+        if part
+    ]
+    return " ".join(parts)
+
+
 def format_user_class_label(user) -> str:
     """格式化用户的完整班级展示文本（年级 + 专业 + 班级，缺省自动省略）。"""
     if user is None:
         return ""
-    grade = str(getattr(user, "grade", "") or "").strip()
-    major = str(getattr(user, "major", "") or "").strip()
-    class_name = str(getattr(user, "class_name", "") or "").strip()
-    parts = [part for part in (grade, major, class_name) if part]
-    return " ".join(parts)
+    return format_class_scope_label(
+        getattr(user, "grade", ""),
+        getattr(user, "major", ""),
+        getattr(user, "class_name", ""),
+    )
+
+
+def parse_class_filter(raw_value: str | None = None, *, grade: str | None = None, major: str | None = None) -> dict[str, str]:
+    """解析班级筛选参数为 {"grade", "major", "class_name"}。
+
+    兼容：
+    - 完整展示标签："2025级 信息安全 01班" / "2025级 01班" / "信息安全 01班"
+    - 管道分隔格式："2025级|信息安全|01班"
+    - 显式分离参数：grade="2025级", major="信息安全", raw_value="01班"
+    - 旧版单字段："信安25-1班" 或 "01班"
+    """
+    explicit_grade = str(grade or "").strip()
+    explicit_major = str(major or "").strip()
+    raw = str(raw_value or "").strip()
+
+    if not raw and not explicit_grade and not explicit_major:
+        return {"grade": "", "major": "", "class_name": ""}
+
+    parsed_grade = explicit_grade
+    parsed_major = explicit_major
+    parsed_class = raw
+
+    if raw and not explicit_grade and not explicit_major:
+        if "|" in raw:
+            parts = [p.strip() for p in raw.split("|")]
+            if len(parts) >= 3:
+                parsed_grade, parsed_major, parsed_class = parts[0], parts[1], parts[2]
+            elif len(parts) == 2:
+                parsed_grade, parsed_class = parts[0], parts[1]
+        else:
+            tokens = raw.split()
+            if len(tokens) >= 3:
+                parsed_grade = tokens[0]
+                parsed_class = tokens[-1]
+                parsed_major = " ".join(tokens[1:-1])
+            elif len(tokens) == 2:
+                first, second = tokens[0], tokens[1]
+                if GRADE_RE.match(first) or first.endswith("级") or first.startswith("大"):
+                    parsed_grade = first
+                    parsed_class = second
+                else:
+                    parsed_major = first
+                    parsed_class = second
+
+    return {
+        "grade": parsed_grade,
+        "major": parsed_major,
+        "class_name": parsed_class,
+    }
+
+
+def build_class_scope_q(
+    raw_value: str | None = None,
+    *,
+    prefix: str = "",
+    grade: str | None = None,
+    major: str | None = None,
+) -> Q:
+    """根据 (grade, major, class_name) 构造精确 ORM 过滤 Q 条件（未填年级/专业时自动兼容旧数据）。"""
+    parsed = parse_class_filter(raw_value, grade=grade, major=major)
+    clause = Q()
+    if parsed["class_name"]:
+        clause &= Q(**{f"{prefix}class_name": parsed["class_name"]})
+    if parsed["grade"]:
+        clause &= Q(**{f"{prefix}grade": parsed["grade"]})
+    if parsed["major"]:
+        clause &= Q(**{f"{prefix}major": parsed["major"]})
+    return clause
+
+
+def scope_matches_class_filter(scope: dict[str, str], parsed_filter: dict[str, str]) -> bool:
+    """判断单个审核员管辖 scope 是否覆盖目标班级筛选条件（防跨年级/跨专业同名班级越权）。"""
+    scope_cls = str(scope.get("class_name") or "").strip()
+    target_cls = str(parsed_filter.get("class_name") or "").strip()
+    if not scope_cls or not target_cls or scope_cls != target_cls:
+        return False
+
+    scope_grade = str(scope.get("grade") or "").strip()
+    target_grade = str(parsed_filter.get("grade") or "").strip()
+    if scope_grade and target_grade and scope_grade != target_grade:
+        return False
+
+    scope_major = str(scope.get("major") or "").strip()
+    target_major = str(parsed_filter.get("major") or "").strip()
+    if scope_major and target_major and scope_major != target_major:
+        return False
+
+    return True
 
 
 def reviewer_own_class_scope(user) -> dict[str, str] | None:
@@ -61,8 +163,8 @@ def reviewer_own_class_scope(user) -> dict[str, str] | None:
     }
 
 
-def reviewer_assigned_classes(user, *, activity_id=None) -> list[str]:
-    """当团支书账号本身未填写班级时，读取显式配置的非空 ReviewAssignment 班级列表。"""
+def reviewer_assigned_scopes(user, *, activity_id=None) -> list[dict[str, str]]:
+    """读取团支书通过 ReviewAssignment 显式分配的精确 (grade, major, class_name) 范围列表。"""
     if not is_reviewer(user):
         return []
     from apps.reviews.models import ReviewAssignment
@@ -70,12 +172,43 @@ def reviewer_assigned_classes(user, *, activity_id=None) -> list[str]:
     qs = ReviewAssignment.objects.filter(reviewer=user)
     if activity_id is not None:
         qs = qs.filter(activity_id=activity_id)
-    classes = {
-        str(cls or "").strip()
-        for cls in qs.values_list("class_name", flat=True)
-        if str(cls or "").strip()
-    }
+    seen: set[tuple[str, str, str]] = set()
+    scopes: list[dict[str, str]] = []
+    for g, m, c in qs.values_list("grade", "major", "class_name"):
+        clean_c = str(c or "").strip()
+        if not clean_c:
+            continue
+        clean_g = str(g or "").strip()
+        clean_m = str(m or "").strip()
+        key = (clean_g, clean_m, clean_c)
+        if key not in seen:
+            seen.add(key)
+            scopes.append({"grade": clean_g, "major": clean_m, "class_name": clean_c})
+    scopes.sort(key=lambda item: (item["grade"], item["major"], item["class_name"]))
+    return scopes
+
+
+def reviewer_assigned_classes(user, *, activity_id=None) -> list[str]:
+    """当团支书账号本身未填写班级时，读取显式配置的非空 ReviewAssignment 班级名列表。"""
+    classes = {scope["class_name"] for scope in reviewer_assigned_scopes(user, activity_id=activity_id)}
     return sorted(classes)
+
+
+def reviewer_allowed_class_scopes(user, *, activity_id=None) -> list[dict[str, str]]:
+    """返回团支书允许管理的精确班级 scope 列表（默认拒绝：未绑定班级返回空列表）。"""
+    scope = reviewer_own_class_scope(user)
+    if scope is not None:
+        return [scope]
+    return reviewer_assigned_scopes(user, activity_id=activity_id)
+
+
+def reviewer_allowed_class_labels(user, *, activity_id=None) -> list[str]:
+    """返回团支书允许管理的完整班级展示标签列表（如「2025级 信息安全 01班」）。"""
+    labels = {
+        format_class_scope_label(s["grade"], s["major"], s["class_name"])
+        for s in reviewer_allowed_class_scopes(user, activity_id=activity_id)
+    }
+    return sorted(lbl for lbl in labels if lbl)
 
 
 def reviewer_allowed_class_names(user, *, activity_id=None) -> list[str]:
@@ -93,19 +226,19 @@ def reviewer_user_scope_q(user, *, prefix: str = "", activity_id=None) -> Q:
     if not is_reviewer(user):
         return Q(pk__in=[])
 
-    scope = reviewer_own_class_scope(user)
-    if scope is not None:
-        clause = Q(**{f"{prefix}class_name": scope["class_name"]})
-        if scope["grade"]:
-            clause &= Q(**{f"{prefix}grade": scope["grade"]})
-        if scope["major"]:
-            clause &= Q(**{f"{prefix}major": scope["major"]})
-        return clause
+    scopes = reviewer_allowed_class_scopes(user, activity_id=activity_id)
+    if not scopes:
+        return Q(pk__in=[])
 
-    assigned = reviewer_assigned_classes(user, activity_id=activity_id)
-    if assigned:
-        return Q(**{f"{prefix}class_name__in": assigned})
-    return Q(pk__in=[])
+    clause = Q(pk__in=[])
+    for scope in scopes:
+        item_q = Q(**{f"{prefix}class_name": scope["class_name"]})
+        if scope["grade"]:
+            item_q &= Q(**{f"{prefix}grade": scope["grade"]})
+        if scope["major"]:
+            item_q &= Q(**{f"{prefix}major": scope["major"]})
+        clause |= item_q
+    return clause
 
 
 def is_target_in_reviewer_scope(actor, target_user, *, activity_id=None) -> bool:
@@ -118,19 +251,19 @@ def is_target_in_reviewer_scope(actor, target_user, *, activity_id=None) -> bool
     target_class = str(getattr(target_user, "class_name", "") or "").strip()
     if not target_class:
         return False
+    target_grade = str(getattr(target_user, "grade", "") or "").strip()
+    target_major = str(getattr(target_user, "major", "") or "").strip()
 
-    scope = reviewer_own_class_scope(actor)
-    if scope is not None:
+    scopes = reviewer_allowed_class_scopes(actor, activity_id=activity_id)
+    for scope in scopes:
         if target_class != scope["class_name"]:
-            return False
-        if scope["grade"] and str(getattr(target_user, "grade", "") or "").strip() != scope["grade"]:
-            return False
-        if scope["major"] and str(getattr(target_user, "major", "") or "").strip() != scope["major"]:
-            return False
+            continue
+        if scope["grade"] and target_grade != scope["grade"]:
+            continue
+        if scope["major"] and target_major != scope["major"]:
+            continue
         return True
-
-    assigned = reviewer_assigned_classes(actor, activity_id=activity_id)
-    return target_class in assigned
+    return False
 
 
 def _audit_denial(request, required_label: str, reason: str) -> None:

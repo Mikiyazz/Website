@@ -58,9 +58,10 @@ from .policies import (
 from .services import (
     ACTIVE_STATES,
     STREAM_CHUNK_BYTES,
-    _remove_physical_file,
     _submission_upload_scope_q,
     assert_extension_count_available,
+    cleanup_upload_disk_artifacts,
+    ensure_disk_space_available,
     ensure_standard_material_requirements,
     resolve_file_disk_path,
     resolve_upload_submission,
@@ -261,33 +262,81 @@ def start_chunked_upload(
         chunk_tmp_dir(resumable).mkdir(parents=True, exist_ok=True)
         return resumable, True
 
-    active_count = UploadSession.objects.filter(owner=owner, status__in=ACTIVE_STATES).count()
-    if active_count >= settings.MAX_ACTIVE_UPLOADS_PER_USER:
-        raise Conflict("同时上传任务过多，请先完成或取消已有任务。")
-
-    siblings = list(
-        UploadSession.objects.filter(scope_q, owner=owner, requirement=requirement).exclude(
-            status=UploadSession.Status.ABORTED
-        )
-    )
-    if any(item.status in ACTIVE_STATES for item in siblings):
-        raise Conflict("此材料类别已有正在进行的上传任务，请先完成或取消后再试。")
-    if len(siblings) >= requirement.max_count and requirement.max_count != 1:
-        raise Conflict(f"此材料类别已达到文件数量上限（最多 {requirement.max_count} 份）。")
-    assert_extension_count_available(siblings, requirement, extension)
-
+    # 严格锁顺序：user -> quota -> upload。
     quota, _ = StorageQuota.objects.get_or_create(
         owner=owner,
         activity=activity,
         defaults={"limit_bytes": activity.quota_bytes_per_student},
     )
     quota = StorageQuota.objects.select_for_update().get(pk=quota.pk)
+
+    siblings = list(
+        UploadSession.objects.select_for_update()
+        .filter(scope_q, owner=owner, requirement=requirement)
+        .exclude(status=UploadSession.Status.ABORTED)
+        .order_by("created_at")
+    )
+
+    is_single_file_rule = requirement.max_count == 1 or requirement.code in SINGLE_FILE_MATERIAL_CODES
+    if is_single_file_rule:
+        # 单文件类别（如宣讲视频）换传新文件时，自动中止同申报同类别下残留的旧 UPLOADING 会话、
+        # 释放预留额度并在 on_commit 清理旧分片目录，彻底避免取消/换选导致 409 死锁 72 小时。
+        stale_uploading = [item for item in siblings if item.status == UploadSession.Status.UPLOADING]
+        if stale_uploading:
+            aborted_keys: list[str] = []
+            quota_dirty = False
+            for old in stale_uploading:
+                if old.quota_id == quota.pk:
+                    release = min(int(quota.reserved_bytes or 0), int(old.declared_bytes or 0))
+                    if release:
+                        quota.reserved_bytes -= release
+                        quota_dirty = True
+                elif old.quota_id:
+                    other_quota = StorageQuota.objects.select_for_update().get(pk=old.quota_id)
+                    release = min(int(other_quota.reserved_bytes or 0), int(old.declared_bytes or 0))
+                    if release:
+                        other_quota.reserved_bytes -= release
+                        other_quota.save(update_fields=["reserved_bytes", "updated_at"])
+                old.status = UploadSession.Status.ABORTED
+                old.save(update_fields=["status", "updated_at"])
+                aborted_keys.append(str(old.object_key or ""))
+                record(
+                    actor=owner,
+                    action="upload.chunk_superseded",
+                    target=old,
+                    metadata={
+                        "requirement_code": requirement.code,
+                        "superseded_name": old.original_name,
+                        "replaced_by_name": filename,
+                        "released_reserved_bytes": int(old.declared_bytes or 0),
+                    },
+                )
+            if quota_dirty:
+                quota.save(update_fields=["reserved_bytes", "updated_at"])
+            stale_ids = {old.pk for old in stale_uploading}
+            siblings = [item for item in siblings if item.pk not in stale_ids]
+            keys_snapshot = tuple(aborted_keys)
+            transaction.on_commit(lambda keys=keys_snapshot: cleanup_upload_disk_artifacts(keys))
+
+    active_count = UploadSession.objects.filter(owner=owner, status__in=ACTIVE_STATES).count()
+    if active_count >= settings.MAX_ACTIVE_UPLOADS_PER_USER:
+        raise Conflict("同时上传任务过多，请先完成或取消已有任务。")
+
+    if is_single_file_rule:
+        if any(item.status in ACTIVE_STATES for item in siblings):
+            raise Conflict("此材料类别已有正在进行的上传任务，请先完成或取消后再试。")
+    else:
+        if len(siblings) >= requirement.max_count:
+            raise Conflict(f"此材料类别已达到文件数量上限（最多 {requirement.max_count} 份）。")
+        assert_extension_count_available(siblings, requirement, extension)
+
     if quota.used_bytes + quota.reserved_bytes + file_size > quota.limit_bytes:
         raise QuotaExceeded(
             "该活动存储额度不足：已占用 "
             f"{quota.used_bytes + quota.reserved_bytes:,} 字节 / 上限 {quota.limit_bytes:,} 字节，"
             f"本次还需 {file_size:,} 字节。"
         )
+    ensure_disk_space_available(required_bytes=file_size)
     quota.reserved_bytes += file_size
     quota.save(update_fields=["reserved_bytes", "updated_at"])
 
@@ -336,12 +385,15 @@ def store_chunk(*, actor, upload_id, chunk_index, chunk_file) -> tuple[UploadSes
     upload = _owned_upload(actor, upload_id)
     from apps.submissions.services import ensure_submission_editable_by_student
 
+    ensure_activity_open(upload.requirement.activity, actor)
     ensure_submission_editable_by_student(upload.submission)
 
     if upload.status == UploadSession.Status.COMPLETE:
         raise Conflict("该上传任务已完成，无需继续上传分片。")
     if upload.status != UploadSession.Status.UPLOADING:
         raise Conflict("该上传任务已取消或正在合并，无法继续上传分片。")
+    if upload.expires_at and upload.expires_at <= timezone.now():
+        raise Conflict("该上传任务已过期，请重新发起上传。")
 
     try:
         index = int(str(chunk_index).strip())
@@ -369,6 +421,8 @@ def store_chunk(*, actor, upload_id, chunk_index, chunk_file) -> tuple[UploadSes
     # 幂等：同名分片已存在且长度一致，直接返回，支持断点续传。
     if target.exists() and target.stat().st_size == size:
         return upload, index, True
+
+    ensure_disk_space_available(required_bytes=size, target_dir=directory)
 
     staging = directory / f".{index:06d}.part.{uuid.uuid4().hex}.tmp"
     written = 0
@@ -444,188 +498,255 @@ def _schedule_validation(asset: FileAsset) -> bool:
     return True
 
 
-@transaction.atomic
+def _restore_uploading_if_completing(upload_pk) -> None:
+    """Restore COMPLETING -> UPLOADING only when still in COMPLETING (never overwrite ABORTED/COMPLETE)."""
+    UploadSession.objects.filter(
+        pk=upload_pk,
+        status=UploadSession.Status.COMPLETING,
+    ).update(status=UploadSession.Status.UPLOADING, updated_at=timezone.now())
+
+
 def complete_chunked_upload(*, actor, upload_id, material_type=None) -> tuple[UploadSession, FileAsset, list]:
-    """Verify every part, merge in index order, then mark the session complete.
+    """Verify every part, merge in index order outside DB transactions, then commit quota and records.
+
+    Three-phase protocol:
+    1. Short DB tx 1: lock upload row, validate metadata/state, transition UPLOADING -> COMPLETING.
+    2. Outside DB tx: verify parts & magic header, stream-merge + fsync + os.replace, run content check.
+    3. Short DB tx 2: settle quota, validate counts/extension caps, mark COMPLETE, create FileAsset,
+       mark replaced uploads ABORTED, and defer all physical/tmp deletions to transaction.on_commit.
 
     Returns (upload, file_asset, replaced_upload_ids).
     """
     require_student(actor)
-    upload = _owned_upload(actor, upload_id, lock=True)
     from apps.submissions.services import ensure_submission_editable_by_student
 
-    ensure_submission_editable_by_student(upload.submission)
+    # -----------------------------------------------------------------------
+    # 阶段 1（短事务 1）：锁行校验并切为 COMPLETING，阻断并发分片写入或重复合并。
+    # -----------------------------------------------------------------------
+    with transaction.atomic():
+        upload = _owned_upload(actor, upload_id, lock=True)
+        ensure_submission_editable_by_student(upload.submission)
 
-    requirement = upload.requirement
-    if requirement is None:  # pragma: no cover - FK is PROTECT
-        raise DomainError("上传任务缺少材料类别。")
+        requirement = upload.requirement
+        if requirement is None:  # pragma: no cover - FK is PROTECT
+            raise DomainError("上传任务缺少材料类别。")
 
-    if material_type:
-        code = canonical_material_type(material_type)
-        if code is None:
-            raise DomainError("material_type 非法。")
-        if code != requirement.code:
-            raise DomainError("material_type 与本次上传的材料类别不一致。")
+        if material_type:
+            code = canonical_material_type(material_type)
+            if code is None:
+                raise DomainError("material_type 非法。")
+            if code != requirement.code:
+                raise DomainError("material_type 与本次上传的材料类别不一致。")
 
-    if upload.status == UploadSession.Status.COMPLETE:
-        asset = FileAsset.objects.filter(upload=upload).first()
-        if asset is None:
-            raise Conflict("该上传任务已完成但缺少文件记录。")
-        return upload, asset, []
-    if upload.status != UploadSession.Status.UPLOADING:
-        raise Conflict("该上传任务已取消或正在合并，无法完成合并。")
+        if upload.status == UploadSession.Status.COMPLETE:
+            asset = FileAsset.objects.filter(upload=upload).first()
+            if asset is None:
+                raise Conflict("该上传任务已完成但缺少文件记录。")
+            return upload, asset, []
+        if upload.status != UploadSession.Status.UPLOADING:
+            raise Conflict("该上传任务已取消或正在合并，无法完成合并。")
+        ensure_activity_open(requirement.activity, actor)
+        if upload.expires_at and upload.expires_at <= timezone.now():
+            raise Conflict("该上传任务已过期，请重新发起上传。")
 
-    extension = validate_metadata(
-        filename=upload.original_name,
-        declared_bytes=upload.declared_bytes,
-        requirement=requirement,
-    )
-
-    parts = received_parts(upload)
-    missing = [index for index in range(upload.total_chunks) if index not in parts]
-    if missing:
-        raise DomainError(
-            f"分片不完整：缺少 {len(missing)} 片（首个缺失为第 {missing[0] + 1} 片），请继续上传后再合并。"
+        extension = validate_metadata(
+            filename=upload.original_name,
+            declared_bytes=upload.declared_bytes,
+            requirement=requirement,
         )
-    empty = [index for index, size in parts.items() if size <= 0]
-    if empty:
-        raise DomainError(f"分片内容为空：第 {empty[0] + 1} 片为 0 字节。")
 
-    total_bytes = sum(parts.values())
-    tolerance = upload.chunk_size_bytes  # ±1 片噪声
-    if abs(total_bytes - upload.declared_bytes) > tolerance:
-        raise DomainError(
-            f"分片总大小 {total_bytes:,} 字节与声明的 {upload.declared_bytes:,} 字节不一致"
-            f"（允许误差 ±{tolerance:,} 字节）。"
-        )
-    max_allowed = effective_max_file_bytes(requirement.code, extension, requirement.max_file_bytes)
-    if total_bytes <= 0 or total_bytes > max_allowed:
-        raise DomainError(f"合并后文件大小超出允许范围（上限 {max_allowed // MB}MB）。")
+        upload.status = UploadSession.Status.COMPLETING
+        upload.save(update_fields=["status", "updated_at"])
 
-    # 魔数校验只读第 1 片的头 32 字节，与直传路径使用同一套规则。
-    with open(_part_path(upload, 0), "rb") as first_part:
-        header = first_part.read(32)
-    detected_type = validate_magic_bytes(header, extension)
+        upload_pk = upload.pk
+        owner_id = upload.owner_id
+        quota_id = upload.quota_id
+        student_number = getattr(upload.owner, "username", "") or f"user-{upload.owner_id}"
+        activity_id = requirement.activity_id
+        requirement_code = requirement.code
+        requirement_max_file_bytes = requirement.max_file_bytes
+        tmp_dir = chunk_tmp_dir(upload)
 
-    # 目录结构固定 <activity_id>/<student_number>/<material_type>/<uuid4().hex><ext>；
-    # 原始文件名只在 DB 的 original_name 里，永远不进物理路径。
-    final_key = build_object_key(
-        activity_id=requirement.activity_id,
-        student_number=getattr(upload.owner, "username", "") or f"user-{upload.owner_id}",
-        material_code=requirement.code,
-        extension=extension,
-    )
-    final_path = resolve_file_disk_path(final_key)
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-
-    written, checksum = _merge_parts(upload, final_path, total_bytes)
-
-    # 合并后的整份文件再走一次结构校验（容器结构 / ZipSlip / ffprobe），失败即删文件。
+    # -----------------------------------------------------------------------
+    # 阶段 2（事务外）：校验分片、流式合并 + fsync + os.replace、容器与 ZIP 深度校验。
+    # -----------------------------------------------------------------------
+    final_path: Path | None = None
     try:
+        parts = received_parts(upload)
+        missing = [index for index in range(upload.total_chunks) if index not in parts]
+        if missing:
+            raise DomainError(
+                f"分片不完整：缺少 {len(missing)} 片（首个缺失为第 {missing[0] + 1} 片），请继续上传后再合并。"
+            )
+        empty = [index for index, size in parts.items() if size <= 0]
+        if empty:
+            raise DomainError(f"分片内容为空：第 {empty[0] + 1} 片为 0 字节。")
+
+        total_bytes = sum(parts.values())
+        tolerance = upload.chunk_size_bytes  # ±1 片噪声
+        if abs(total_bytes - upload.declared_bytes) > tolerance:
+            raise DomainError(
+                f"分片总大小 {total_bytes:,} 字节与声明的 {upload.declared_bytes:,} 字节不一致"
+                f"（允许误差 ±{tolerance:,} 字节）。"
+            )
+        max_allowed = effective_max_file_bytes(requirement_code, extension, requirement_max_file_bytes)
+        if total_bytes <= 0 or total_bytes > max_allowed:
+            raise DomainError(f"合并后文件大小超出允许范围（上限 {max_allowed // MB}MB）。")
+
+        # 魔数校验只读第 1 片的头 32 字节，与直传路径使用同一套规则。
+        with open(_part_path(upload, 0), "rb") as first_part:
+            header = first_part.read(32)
+        detected_type = validate_magic_bytes(header, extension)
+
+        # 目录结构固定 <activity_id>/<student_number>/<material_type>/<uuid4().hex><ext>；
+        # 原始文件名只在 DB 的 original_name 里，永远不进物理路径。
+        final_key = build_object_key(
+            activity_id=activity_id,
+            student_number=student_number,
+            material_code=requirement_code,
+            extension=extension,
+        )
+        final_path = resolve_file_disk_path(final_key)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_disk_space_available(required_bytes=total_bytes, target_dir=final_path.parent)
+
+        written, checksum = _merge_parts(upload, final_path, total_bytes)
+
+        # 合并后的整份文件再走一次结构校验（容器结构 / ZipSlip / Pillow / 可选 ffprobe）。
         detected_type = validate_stored_file_content(final_path, extension)
     except Exception:
-        final_path.unlink(missing_ok=True)
+        # 仅删除本次新建的合并文件，原文件与分片目录完好保留，并将状态恢复回 UPLOADING 以便重试。
+        if final_path is not None:
+            final_path.unlink(missing_ok=True)
+        _restore_uploading_if_completing(upload_pk)
         raise
 
-    replace_all = requirement.max_count == 1 or requirement.code in SINGLE_FILE_MATERIAL_CODES
-    scope_q = _submission_upload_scope_q(
-        owner_id=upload.owner_id,
-        activity_id=requirement.activity_id,
-        submission=upload.submission,
-    )
-    siblings = list(
-        UploadSession.objects.select_for_update()
-        .filter(scope_q, owner=upload.owner, requirement=requirement)
-        .exclude(pk=upload.pk)
-        .exclude(status=UploadSession.Status.ABORTED)
-        .order_by("created_at")
-    )
-    if not replace_all and len(siblings) + 1 > requirement.max_count:
+    # -----------------------------------------------------------------------
+    # 阶段 3（短事务 2）：按 user -> quota -> upload 锁序结算配额、落库并延后物理清理至 on_commit。
+    # -----------------------------------------------------------------------
+    try:
+        with transaction.atomic():
+            User.objects.select_for_update().get(pk=owner_id)
+            quota = StorageQuota.objects.select_for_update().get(pk=quota_id)
+            upload = (
+                UploadSession.objects.select_related("requirement__activity", "owner", "submission")
+                .select_for_update()
+                .get(pk=upload_pk)
+            )
+            if upload.status != UploadSession.Status.COMPLETING:
+                raise Conflict("该上传任务状态已变更，无法完成合并。")
+            ensure_activity_open(upload.requirement.activity, upload.owner)
+            if upload.expires_at and upload.expires_at <= timezone.now():
+                raise Conflict("该上传任务已过期，请重新发起上传。")
+            ensure_submission_editable_by_student(upload.submission)
+
+            requirement = upload.requirement
+            replace_all = requirement.max_count == 1 or requirement.code in SINGLE_FILE_MATERIAL_CODES
+            scope_q = _submission_upload_scope_q(
+                owner_id=upload.owner_id,
+                activity_id=requirement.activity_id,
+                submission=upload.submission,
+            )
+            siblings = list(
+                UploadSession.objects.select_for_update()
+                .filter(scope_q, owner=upload.owner, requirement=requirement)
+                .exclude(pk=upload.pk)
+                .exclude(status=UploadSession.Status.ABORTED)
+                .order_by("created_at")
+            )
+            if not replace_all:
+                if len(siblings) + 1 > requirement.max_count:
+                    raise Conflict(f"此材料类别已达到文件数量上限（最多 {requirement.max_count} 份）。")
+                assert_extension_count_available(siblings, requirement, extension)
+            replaced = siblings if replace_all else []
+
+            old_assets = (
+                {
+                    asset.upload_id: asset
+                    for asset in FileAsset.objects.select_for_update().filter(upload__in=replaced)
+                }
+                if replaced
+                else {}
+            )
+            release_used = 0
+            release_reserved = 0
+            for old in replaced:
+                if old.status == UploadSession.Status.COMPLETE:
+                    old_asset = old_assets.get(old.id)
+                    release_used += old_asset.actual_bytes if old_asset is not None else old.declared_bytes
+                else:
+                    release_reserved += old.declared_bytes
+
+            projected_used = max(0, quota.used_bytes - release_used) + written
+            # 本次自己的预留（declared_bytes）在合并完成时转为已用。
+            projected_reserved = max(0, quota.reserved_bytes - upload.declared_bytes - release_reserved)
+            if projected_used + projected_reserved > quota.limit_bytes:
+                raise QuotaExceeded(
+                    "该活动存储额度不足：本次合并后需 "
+                    f"{projected_used + projected_reserved:,} 字节 / 上限 {quota.limit_bytes:,} 字节。"
+                )
+
+            quota.used_bytes = projected_used
+            quota.reserved_bytes = projected_reserved
+            quota.save(update_fields=["used_bytes", "reserved_bytes", "updated_at"])
+
+            replaced_ids = []
+            old_keys_to_delete = []
+            for old in replaced:
+                old.status = UploadSession.Status.ABORTED
+                old.save(update_fields=["status", "updated_at"])
+                old_asset = old_assets.get(old.id)
+                if old_asset is not None and old_asset.status != FileAsset.Status.INVALID:
+                    old_asset.status = FileAsset.Status.INVALID
+                    old_asset.save(update_fields=["status", "updated_at"])
+                replaced_ids.append(old.id)
+                old_keys_to_delete.append(str(old.object_key or ""))
+
+            old_tmp_key = str(upload.object_key or "")
+            upload.status = UploadSession.Status.COMPLETE
+            upload.object_key = final_key
+            upload.save(update_fields=["status", "object_key", "updated_at"])
+
+            asset = FileAsset.objects.create(
+                upload=upload,
+                actual_bytes=written,
+                detected_type=detected_type,
+                checksum_algorithm="sha256",
+                checksum_value=checksum,
+                status=FileAsset.Status.VALID,
+            )
+
+            record(
+                actor=upload.owner,
+                action="upload.chunk_completed",
+                target=upload,
+                metadata={
+                    "requirement_code": requirement.code,
+                    "original_name": upload.original_name,
+                    "actual_bytes": written,
+                    "total_chunks": upload.total_chunks,
+                    "replaced_upload_ids": [str(item) for item in replaced_ids],
+                },
+            )
+
+            cleanup_keys = tuple(old_keys_to_delete)
+            tmp_dir_snapshot = tmp_dir
+            old_tmp_key_snapshot = old_tmp_key
+
+            def _after_commit():
+                # 100% 延后至 DB 提交成功后删除分片目录与旧物理文件，回滚绝不丢原文件与分片。
+                shutil.rmtree(tmp_dir_snapshot, ignore_errors=True)
+                if old_tmp_key_snapshot.startswith(TMP_PREFIX + "/"):
+                    cleanup_upload_disk_artifacts((old_tmp_key_snapshot,))
+                if cleanup_keys:
+                    cleanup_upload_disk_artifacts(cleanup_keys)
+                _schedule_validation(asset)
+
+            transaction.on_commit(_after_commit)
+    except Exception:
+        # 提交失败/回滚：仅删除本次新建的合并文件并恢复 UPLOADING，旧文件与分片目录毫发无损。
         final_path.unlink(missing_ok=True)
-        raise Conflict(f"此材料类别已达到文件数量上限（最多 {requirement.max_count} 份）。")
-    replaced = siblings if replace_all else []
+        _restore_uploading_if_completing(upload_pk)
+        raise
 
-    old_assets = (
-        {
-            asset.upload_id: asset
-            for asset in FileAsset.objects.select_for_update().filter(upload__in=replaced)
-        }
-        if replaced
-        else {}
-    )
-    release_used = 0
-    release_reserved = 0
-    for old in replaced:
-        if old.status == UploadSession.Status.COMPLETE:
-            old_asset = old_assets.get(old.id)
-            release_used += old_asset.actual_bytes if old_asset is not None else old.declared_bytes
-        else:
-            release_reserved += old.declared_bytes
-
-    quota = StorageQuota.objects.select_for_update().get(pk=upload.quota_id)
-    projected_used = max(0, quota.used_bytes - release_used) + written
-    # 本次自己的预留（declared_bytes）在合并完成时转为已用。
-    projected_reserved = max(0, quota.reserved_bytes - upload.declared_bytes - release_reserved)
-    if projected_used + projected_reserved > quota.limit_bytes:
-        final_path.unlink(missing_ok=True)
-        raise QuotaExceeded(
-            "该活动存储额度不足：本次合并后需 "
-            f"{projected_used + projected_reserved:,} 字节 / 上限 {quota.limit_bytes:,} 字节。"
-        )
-
-    quota.used_bytes = projected_used
-    quota.reserved_bytes = projected_reserved
-    quota.save(update_fields=["used_bytes", "reserved_bytes", "updated_at"])
-
-    replaced_ids = []
-    old_keys_to_delete = []
-    for old in replaced:
-        old.status = UploadSession.Status.ABORTED
-        old.save(update_fields=["status", "updated_at"])
-        old_asset = old_assets.get(old.id)
-        if old_asset is not None and old_asset.status != FileAsset.Status.INVALID:
-            old_asset.status = FileAsset.Status.INVALID
-            old_asset.save(update_fields=["status", "updated_at"])
-        replaced_ids.append(old.id)
-        old_keys_to_delete.append(old.object_key)
-
-    upload.status = UploadSession.Status.COMPLETE
-    upload.object_key = final_key
-    upload.save(update_fields=["status", "object_key", "updated_at"])
-
-    asset = FileAsset.objects.create(
-        upload=upload,
-        actual_bytes=written,
-        detected_type=detected_type,
-        checksum_algorithm="sha256",
-        checksum_value=checksum,
-        status=FileAsset.Status.VALID,
-    )
-
-    # 分片读完后整目录删除，磁盘上不留 tmp/<upload_id>/。
-    shutil.rmtree(chunk_tmp_dir(upload), ignore_errors=True)
-
-    for old_key in old_keys_to_delete:
-        key_text = str(old_key)
-        if key_text.startswith(TMP_PREFIX + "/"):
-            try:
-                shutil.rmtree(resolve_file_disk_path(key_text), ignore_errors=True)
-            except DomainError:  # pragma: no cover - defensive
-                pass
-        else:
-            _remove_physical_file(old_key)
-
-    record(
-        actor=upload.owner,
-        action="upload.chunk_completed",
-        target=upload,
-        metadata={
-            "requirement_code": requirement.code,
-            "original_name": upload.original_name,
-            "actual_bytes": written,
-            "total_chunks": upload.total_chunks,
-            "replaced_upload_ids": [str(item) for item in replaced_ids],
-        },
-    )
-    _schedule_validation(asset)
     return upload, asset, replaced_ids

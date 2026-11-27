@@ -5,6 +5,7 @@ import time
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 
+from apps.exports.retention import purge_expired_exports
 from apps.jobs.dispatcher import dispatch_one
 from apps.uploads.retention import purge_stale_uploads
 
@@ -46,6 +47,7 @@ class Command(BaseCommand):
                     raise
             if interval and time.monotonic() >= next_purge_at:
                 self._purge_stale_uploads()
+                self._purge_expired_exports()
                 next_purge_at = time.monotonic() + interval
             if options["once"]:
                 return
@@ -60,3 +62,13 @@ class Command(BaseCommand):
             return
         if result.purged or result.failed:
             logger.info("stale_upload_purge_done", extra=result.as_dict())
+
+    def _purge_expired_exports(self):
+        """Reclaim expired (>72h) export archives on the same housekeeping cadence."""
+        try:
+            result = purge_expired_exports()
+        except Exception as exc:
+            logger.error("expired_export_purge_failed", extra={"error_type": type(exc).__name__})
+            return
+        if result.purged or result.orphans_removed or result.failed:
+            logger.info("expired_export_purge_done", extra=result.as_dict())

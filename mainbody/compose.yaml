@@ -7,13 +7,13 @@ x-app: &app
   environment: &app-env
     DATABASE_URL: postgresql://${POSTGRES_USER:-practice}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-practice}
     CELERY_BROKER_URL: redis://redis:6379/0
-    CACHE_URL: redis://redis:6379/1
+    CACHE_URL: redis://redis-cache:6379/0
   init: true
   restart: unless-stopped
-  # 学生材料必须被 web、dispatcher、worker 共同看到：分片回收和文件校验都要读到真实文件，
+  # 学生材料必须被 web、dispatcher、worker 共同看到，并由 nginx 只读挂载用于 X-Accel-Redirect 下载卸载：
   # 否则 dispatcher 只能改数据库、删不掉别人容器里的字节。
   volumes: ["media_data:/app/media"]
-  pids_limit: 128
+  pids_limit: 256
   security_opt: ["no-new-privileges:true"]
   cap_drop: ["ALL"]
   logging:
@@ -22,6 +22,7 @@ x-app: &app
   depends_on:
     db: {condition: service_healthy}
     redis: {condition: service_healthy}
+    redis-cache: {condition: service_healthy}
 
 services:
   db:
@@ -31,18 +32,19 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-practice}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes: ["postgres_data:/var/lib/postgresql/data"]
-    command: ["postgres", "-c", "max_connections=60", "-c", "shared_buffers=128MB"]
+    command: ["postgres", "-c", "max_connections=120", "-c", "shared_buffers=256MB"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 3s
       retries: 5
     restart: unless-stopped
-    mem_limit: 768m
+    mem_limit: 1536m
     logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+  # Celery Broker 专用 Redis：AOF 持久 + 512MB noeviction，保证排队任务绝不被静默驱逐
   redis:
     image: redis:7.4-bookworm
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "192mb", "--maxmemory-policy", "noeviction"]
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
     volumes: ["redis_data:/data"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -50,7 +52,19 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
-    mem_limit: 384m
+    mem_limit: 768m
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+  # Django Cache 专用 Redis：512MB allkeys-lru，与 Broker 彻底隔离，绝不因缓存写满连坐队列派发
+  redis-cache:
+    image: redis:7.4-bookworm
+    command: ["redis-server", "--appendonly", "no", "--save", "", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 640m
     logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
   migrate:
     <<: *app
@@ -61,8 +75,8 @@ services:
   web:
     <<: *app
     command: ["gunicorn", "-c", "deploy/gunicorn.conf.py", "config.wsgi:application"]
-    mem_limit: 512m
-    cpus: 1.0
+    mem_limit: 2g
+    cpus: 2.0
     healthcheck:
       test: ["CMD", "python", "scripts/check_health.py"]
       interval: 20s
@@ -82,17 +96,19 @@ services:
   worker-exports:
     <<: *app
     command: ["celery", "-A", "config", "worker", "-Q", "exports", "--concurrency=1", "--loglevel=INFO", "--hostname=exports@%h"]
-    mem_limit: 512m
-    cpus: 0.5
+    mem_limit: 1g
+    cpus: 1.0
     stop_grace_period: 360s
   nginx:
     image: nginx:1.28-alpine
     ports: ["127.0.0.1:${WEB_PORT:-8080}:80"]
-    volumes: ["./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    volumes:
+      - "${NGINX_CONF_FILE:-./deploy/nginx.conf}:/etc/nginx/conf.d/default.conf:ro"
+      - "media_data:/app/media:ro"
     depends_on:
       web: {condition: service_healthy}
     restart: unless-stopped
-    mem_limit: 128m
+    mem_limit: 256m
     logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
 
 volumes:

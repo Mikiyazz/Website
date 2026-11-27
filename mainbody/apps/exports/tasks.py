@@ -1,6 +1,7 @@
 """Export Celery tasks: thin wrappers so the web request never builds a ZIP inline."""
 from celery import shared_task
 
+from .retention import purge_expired_exports
 from .services import create_activity_export_job, run_activity_export_job
 
 
@@ -31,3 +32,9 @@ def export_activity_submissions(activity_id, requested_by, job_id=None, mode=Non
         "current": job.current,
         "file_path": job.file_path,
     }
+
+
+@shared_task(name="apps.exports.purge_expired_exports", queue="maintenance")
+def purge_expired_exports_task(retention_hours=None, limit: int = 200):
+    """Reclaim expired activity export ZIP files older than retention_hours (default 72h)."""
+    return purge_expired_exports(retention_hours=retention_hours, limit=limit).as_dict()

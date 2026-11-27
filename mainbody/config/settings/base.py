@@ -46,8 +46,10 @@ DATABASES["default"]["OPTIONS"] = {
     "options": "-c statement_timeout=10000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=15000",
 }
 CACHE_URL = env("CACHE_URL", default="redis://127.0.0.1:6379/1")
+CACHE_DEFAULT_TIMEOUT = env.int("CACHE_DEFAULT_TIMEOUT", default=300)
 CACHES = {"default": {
     "BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": CACHE_URL,
+    "TIMEOUT": CACHE_DEFAULT_TIMEOUT,
     "OPTIONS": {"socket_connect_timeout": 2, "socket_timeout": 2},
 }}
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
@@ -98,12 +100,24 @@ STORAGE_BACKEND = env("STORAGE_BACKEND", default="disabled")
 
 # 审计来源 IP：默认只取 REMOTE_ADDR；部署在可信反向代理后才打开，且逐跳做 IP 校验。
 TRUST_X_FORWARDED_FOR = env.bool("TRUST_X_FORWARDED_FOR", default=False)
-# 视频容器探测：ffprobe 可执行文件名或绝对路径。找不到时降级为"扩展名+大小"并打 warning。
-UPLOAD_FFPROBE_BIN = env("UPLOAD_FFPROBE_BIN", default="ffprobe")
-# ZIP 安全闸（other_materials 允许 .zip）：解压后总大小 200MB、条目数 200、嵌套深度 1。
-ARCHIVE_MAX_TOTAL_BYTES = 200 * 1024 * 1024
-ARCHIVE_MAX_ENTRIES = 200
+# Nginx X-Accel-Redirect 下载卸载：生产默认开启（见 production.py），开发与测试默认关闭。
+NGINX_ACCEL_REDIRECT_ENABLED = env.bool("NGINX_ACCEL_REDIRECT_ENABLED", default=False)
+NGINX_ACCEL_REDIRECT_PREFIX = env("NGINX_ACCEL_REDIRECT_PREFIX", default="/internal-media").rstrip("/")
+# 上传与导出写盘前的磁盘剩余空间硬保护（默认 5 GiB）；低于阈值拒绝新写入并打 ERROR 告警。
+UPLOAD_MIN_FREE_DISK_BYTES = env.int("UPLOAD_MIN_FREE_DISK_BYTES", default=5 * 1024 * 1024 * 1024)
+# 异步导出归档 ZIP 保留时长（小时，默认 72 小时后自动回收，防止反复导出写爆磁盘）。
+EXPORT_RETENTION_HOURS = env.int("EXPORT_RETENTION_HOURS", default=72)
+# 视频容器探测：默认留空停用耗时的外部 ffprobe 探测（保留魔数 + 扩展名 + 大小校验）；
+# 仅在确实需要深度流探测且容器已安装 ffmpeg 时显式配置 UPLOAD_FFPROBE_BIN。
+UPLOAD_FFPROBE_BIN = env("UPLOAD_FFPROBE_BIN", default="")
+# ZIP 安全闸（other_materials 允许 .zip，单包业务上限 2000MB）：
+# 解压总大小上限 2500MB、条目数上限 500、禁止包内嵌套 .zip（深度 1），
+# 并拦截极端压缩比炸弹（压缩比 > 100 且解压后 > 100MB）。
+ARCHIVE_MAX_TOTAL_BYTES = 2500 * 1024 * 1024
+ARCHIVE_MAX_ENTRIES = 500
 ARCHIVE_MAX_DEPTH = 1
+ARCHIVE_MAX_COMPRESSION_RATIO = 100
+ARCHIVE_BOMB_RATIO_MIN_BYTES = 100 * 1024 * 1024
 
 CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://127.0.0.1:6379/0")
 CELERY_ACCEPT_CONTENT = ["json"]

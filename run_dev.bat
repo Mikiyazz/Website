@@ -11,6 +11,14 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+echo [*] 正在检查并同步数据库迁移...
+.\.venv\Scripts\python.exe manage.py migrate --noinput
+if errorlevel 1 (
+    echo [ERROR] 数据库迁移失败，请检查上方报错信息。
+    pause
+    exit /b 1
+)
+
 echo [*] 正在启动 Django 开发服务器...
 echo [*] 访问地址: http://127.0.0.1:8080/
 echo [*] 按 Ctrl+C 即可停止服务。

@@ -7,10 +7,17 @@ from apps.common.models import BaseModel
 class ReviewAssignment(BaseModel):
     reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     activity = models.ForeignKey("activities.Activity", on_delete=models.PROTECT)
+    grade = models.CharField("年级", max_length=32, blank=True, default="")
+    major = models.CharField("专业", max_length=100, blank=True, default="")
     class_name = models.CharField(max_length=100)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["reviewer", "activity", "class_name"], name="unique_review_assignment")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["reviewer", "activity", "grade", "major", "class_name"],
+                name="unique_review_assignment",
+            )
+        ]
 
 
 class ReviewRecord(BaseModel):

@@ -5,9 +5,9 @@ from .models import ReviewAssignment, ReviewRecord
 
 @admin.register(ReviewAssignment)
 class ReviewAssignmentAdmin(admin.ModelAdmin):
-    list_display = ("reviewer", "activity", "class_name", "created_at")
-    list_filter = ("activity", "class_name")
-    search_fields = ("reviewer__username", "reviewer__real_name", "class_name")
+    list_display = ("reviewer", "activity", "grade", "major", "class_name", "created_at")
+    list_filter = ("activity", "grade", "major", "class_name")
+    search_fields = ("reviewer__username", "reviewer__real_name", "grade", "major", "class_name")
 
 
 @admin.register(ReviewRecord)

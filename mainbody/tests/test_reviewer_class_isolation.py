@@ -88,10 +88,10 @@ def test_reviewer_only_sees_own_class_registrations_and_approves_own_class_outco
     other_grade_sub = _create_submitted_project(other_grade_same_cls_stu, activity, "26级一班实践项目")
     other_major_sub = _create_submitted_project(other_major_same_cls_stu, activity, "软工一班实践项目")
 
-    # 1. Selector 层面仅返回本班成果
+    # 1. Selector 层面仅返回本班成果（精确展示 年级 + 专业 + 班级）
     visible_ids = set(reviewable_submissions(reviewer, activity.id).values_list("id", flat=True))
     assert visible_ids == {own_sub.id}
-    assert workbench_class_options(reviewer) == ["01班"]
+    assert workbench_class_options(reviewer) == ["2025级 信息安全 01班"]
 
     # 2. 仪表盘：同时看到本班成果列表 + 本班注册同学信息（不含跨班/跨年级/跨专业）
     client.force_login(reviewer)

@@ -73,6 +73,53 @@ class Submission(BaseModel):
     def export_name_prefix(self) -> str:
         return "late_" if self.is_late_submission else ""
 
+    def save(self, *args, **kwargs):
+        is_create = self._state.adding
+        update_fields = kwargs.get("update_fields")
+        super().save(*args, **kwargs)
+        # 仅当调用方未在 service 层显式同步、且新建非空草稿或显式修改 draft_data 时自动同步团队成员索引表。
+        # 状态变更（如 review_submission 的 update_fields=["status", "updated_at"]）与新建空白草稿 0 额外 SQL。
+        if getattr(self, "_skip_team_member_sync", False):
+            return
+        should_sync = (
+            (is_create and isinstance(self.draft_data, dict) and bool(self.draft_data.get("team_members")))
+            or (not is_create and (update_fields is None or "draft_data" in update_fields))
+        )
+        if should_sync:
+            from .services import sync_submission_team_members
+
+            sync_submission_team_members(self, is_create=is_create)
+
+
+class SubmissionTeamMember(BaseModel):
+    """团队申报成员索引表：替代遍历全表 draft_data JSON，支持毫秒级双向索引查询。"""
+
+    submission = models.ForeignKey(
+        Submission,
+        on_delete=models.CASCADE,
+        related_name="team_member_rows",
+    )
+    activity = models.ForeignKey(
+        "activities.Activity",
+        on_delete=models.CASCADE,
+        related_name="submission_team_members",
+    )
+    student_number = models.CharField("成员学号", max_length=64)
+    real_name = models.CharField("成员姓名", max_length=100, blank=True, default="")
+    class_name = models.CharField("成员班级", max_length=100, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["submission", "student_number"],
+                name="unique_submission_team_member",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["student_number", "activity"], name="sub_tm_stu_act_idx"),
+            models.Index(fields=["activity", "student_number"], name="sub_tm_act_stu_idx"),
+        ]
+
 
 class SubmissionRevision(BaseModel):
     submission = models.ForeignKey(Submission, on_delete=models.PROTECT, related_name="revisions")

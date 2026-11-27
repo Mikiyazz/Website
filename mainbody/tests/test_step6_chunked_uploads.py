@@ -235,7 +235,9 @@ def test_chunk_upload_rejects_other_users_upload_with_403(client, student, other
 # =====================================================================
 
 @pytest.mark.django_db
-def test_chunk_complete_writes_promotional_video_path(client, student, activity, settings, isolated_media_root):
+def test_chunk_complete_writes_promotional_video_path(
+    client, student, activity, settings, isolated_media_root, django_capture_on_commit_callbacks
+):
     settings.UPLOAD_CHUNK_BYTES = SMALL_CHUNK
     reqs = _reqs(activity)
     client.force_login(student)
@@ -248,10 +250,11 @@ def test_chunk_complete_writes_promotional_video_path(client, student, activity,
     for index in (2, 0, 1):
         assert _upload_part(client, upload_id, index, payloads[index]).status_code == 200
 
-    resp = client.post(
-        "/api/v1/uploads/chunk-complete/",
-        {"upload_id": upload_id, "material_type": "video"},
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = client.post(
+            "/api/v1/uploads/chunk-complete/",
+            {"upload_id": upload_id, "material_type": "video"},
+        )
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "uploaded"
@@ -363,7 +366,7 @@ def test_chunk_complete_rejects_forged_magic_bytes(client, student, activity, se
 
 @pytest.mark.django_db
 def test_chunk_complete_replaces_previous_video_and_releases_quota(
-    client, student, activity, settings, isolated_media_root
+    client, student, activity, settings, isolated_media_root, django_capture_on_commit_callbacks
 ):
     settings.UPLOAD_CHUNK_BYTES = SMALL_CHUNK
     reqs = _reqs(activity)
@@ -378,7 +381,8 @@ def test_chunk_complete_replaces_previous_video_and_releases_quota(
     client.force_login(student)
     upload_id = _start(client, reqs["video"], "新宣讲视频.mp4", SMALL_CHUNK, 1).json()["upload_id"]
     assert _upload_part(client, upload_id, 0, _video_bytes(SMALL_CHUNK)).status_code == 200
-    done = client.post("/api/v1/uploads/chunk-complete/", {"upload_id": upload_id}).json()
+    with django_capture_on_commit_callbacks(execute=True):
+        done = client.post("/api/v1/uploads/chunk-complete/", {"upload_id": upload_id}).json()
 
     old_upload.refresh_from_db()
     assert old_upload.status == UploadSession.Status.ABORTED
@@ -413,7 +417,9 @@ def test_chunk_complete_is_idempotent(client, student, activity, settings):
 # =====================================================================
 
 @pytest.mark.django_db
-def test_300mb_promotional_video_completes_under_real_chunk_size(client, student, activity, isolated_media_root):
+def test_300mb_promotional_video_completes_under_real_chunk_size(
+    client, student, activity, isolated_media_root, django_capture_on_commit_callbacks
+):
     chunk = 5 * MB
     total = 60
     size = chunk * total  # 300MB
@@ -433,7 +439,8 @@ def test_300mb_promotional_video_completes_under_real_chunk_size(client, student
         assert part.status_code == 200, part.content[:200]
         assert part.json()["chunk_index"] == index
 
-    done = client.post("/api/v1/uploads/chunk-complete/", {"upload_id": upload_id, "material_type": "video"})
+    with django_capture_on_commit_callbacks(execute=True):
+        done = client.post("/api/v1/uploads/chunk-complete/", {"upload_id": upload_id, "material_type": "video"})
     assert done.status_code == 200, done.content[:200]
     data = done.json()
     assert data["status"] == "uploaded"

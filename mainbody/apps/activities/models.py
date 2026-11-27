@@ -62,8 +62,10 @@ class Activity(BaseModel):
     # 补交截止为空表示“活动截止后长期开放给白名单学生”。
     late_submission_enabled = models.BooleanField("启用补交白名单", default=True)
     late_submission_deadline = models.DateTimeField("补交截止时间", null=True, blank=True)
-    # 12 GiB = 12,884,901,888 B：容纳 5 个 2000MB 打包件（10,485,760,000 B），
-    # 余下约 2.4 GB（2.23 GiB）给申报表/报告/照片/普通证明材料。可按活动单独调整。
+    # 单生默认配额 12 GiB = 12,884,901,888 B：容纳业务上限 5 个 2000MB 打包件（10,485,760,000 B）
+    # + 约 2.4 GB（2.23 GiB）给申报表/报告/照片/宣讲视频。
+    # 矿大服务器部署核定建议：请结合数据盘容量按活动调整（例：500GB 数据盘 2000 人建议设为 1–2 GiB；
+    # 2TB 数据盘建议设为 4–6 GiB），并由 UPLOAD_MIN_FREE_DISK_BYTES（默认 5 GiB）兜底防写爆磁盘。
     quota_bytes_per_student = models.PositiveBigIntegerField(default=12_884_901_888)
 
     class Meta:

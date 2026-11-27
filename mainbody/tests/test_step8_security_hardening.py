@@ -315,7 +315,9 @@ def test_other_student_cannot_read_or_delete_foreign_upload(client, student, oth
 
 
 @pytest.mark.django_db
-def test_reviewer_and_admin_can_delete_materials_of_their_activity(client, student, activity):
+def test_reviewer_and_admin_can_delete_materials_of_their_activity(
+    client, student, activity, django_capture_on_commit_callbacks
+):
     reqs = _reqs(activity)
     reviewer = User.objects.create_user(username="rev_del", password="pwd", role=User.Role.REVIEWER)
     ReviewAssignment.objects.create(reviewer=reviewer, activity=activity, class_name=student.class_name)
@@ -332,7 +334,8 @@ def test_reviewer_and_admin_can_delete_materials_of_their_activity(client, stude
     assert client.delete(f"/api/v1/uploads/{first.id}/delete/").status_code == 403
 
     client.force_login(reviewer)
-    assert client.delete(f"/api/v1/uploads/{first.id}/delete/").status_code == 200
+    with django_capture_on_commit_callbacks(execute=True):
+        assert client.delete(f"/api/v1/uploads/{first.id}/delete/").status_code == 200
     first.refresh_from_db()
     assert first.status == UploadSession.Status.ABORTED
     assert AuditLog.objects.filter(action="upload.deleted_by_staff", target_id=str(first.id)).exists()
@@ -343,7 +346,8 @@ def test_reviewer_and_admin_can_delete_materials_of_their_activity(client, stude
         file_obj=SimpleUploadedFile("报告v2.pdf", b"%PDF-1.7\n" + b"1" * 20),
     )
     client.force_login(admin_user)
-    assert client.delete(f"/api/v1/uploads/{second.id}/delete/").status_code == 200
+    with django_capture_on_commit_callbacks(execute=True):
+        assert client.delete(f"/api/v1/uploads/{second.id}/delete/").status_code == 200
     assert not resolve_file_disk_path(second.object_key).exists()
 
 
@@ -414,7 +418,7 @@ def test_zip_bomb_and_entry_count_and_nested_zip_all_rejected(client, student, a
 
     too_many = io.BytesIO()
     with zipfile.ZipFile(too_many, "w") as archive:
-        for index in range(201):
+        for index in range(501):
             archive.writestr(f"f{index}.txt", b"x")
     resp_many = client.post(
         "/api/v1/uploads/direct-upload/",

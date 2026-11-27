@@ -8,9 +8,9 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_POST
 
-from apps.accounts.permissions import require_student
+from apps.accounts.permissions import is_college_admin, require_student
 from apps.activities.models import Activity, DEFAULT_PROJECT_CATEGORIES
-from apps.activities.selectors import eligible_activities, is_activity_open_for_user
+from apps.activities.selectors import is_activity_open_for_user
 from apps.audit.decorators import audit_rejections
 from apps.audit.services import record_rejection
 from apps.common.api import endpoint, json_body
@@ -306,14 +306,20 @@ def _build_student_submission_page_context(request, *, material_codes, view_name
         messages.warning(request, f"申报与成果栏目仅对学生开放，当前角色为{role_label}，已为您跳转至工作台。")
         return None, redirect("dashboard")
 
-    eligible_qs = eligible_activities(user)
     submitted_act_ids = set(
         Submission.objects.filter(owner=user).values_list("activity_id", flat=True)
     ) | find_team_membership_activity_ids(user.username)
     all_acts = list(Activity.objects.all().order_by("-created_at")[:100])
-    eligible_id_set = set(eligible_qs.values_list("id", flat=True)) | submitted_act_ids
+    user_is_admin = is_college_admin(user)
+    user_class = str(getattr(user, "class_name", "") or "").strip()
+    eligible_id_set = set(submitted_act_ids)
     for act in all_acts:
-        if act.is_in_late_whitelist(user.username):
+        if (
+            not act.allowed_classes
+            or (user_class and user_class in act.allowed_classes)
+            or (user_is_admin and not user_class)
+            or act.is_in_late_whitelist(user.username)
+        ):
             eligible_id_set.add(act.id)
 
     open_activities = []
@@ -383,6 +389,7 @@ def _build_student_submission_page_context(request, *, material_codes, view_name
         },
         "project_categories": list(DEFAULT_PROJECT_CATEGORIES),
         "legacy_category": "",
+        "team_members": [],
         "team_members_json": "[]",
         "declaration_submitted": False,
         "declaration_submitted_at": None,
@@ -530,10 +537,7 @@ def _build_student_submission_page_context(request, *, material_codes, view_name
     )
     is_returned = submission is not None and submission.status == Submission.Status.RETURNED
     latest_returned_record = (
-        submission.review_records.filter(decision="returned")
-        .select_related("reviewer")
-        .order_by("-created_at")
-        .first()
+        next((rec for rec in review_records if rec.decision == "returned"), None)
         if is_returned
         else None
     )
@@ -631,6 +635,7 @@ def _build_student_submission_page_context(request, *, material_codes, view_name
                 "declaration_type": declaration_type,
                 "team_members": team_members,
             },
+            "team_members": team_members,
             "team_members_json": json.dumps(team_members, ensure_ascii=False),
             "declare_url": reverse("submission-declare", args=[submission.id]) if (submission and not is_team_member_view) else "",
             "submit_url": reverse("submission-submit", args=[submission.id]) if (submission and not is_team_member_view) else "",

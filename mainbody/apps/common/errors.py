@@ -17,3 +17,7 @@ class QuotaExceeded(DomainError):
 
 class FeatureUnavailable(DomainError):
     code, status = "not_implemented", 501
+
+
+class InsufficientStorage(DomainError):
+    code, status = "insufficient_storage", 503

@@ -3,7 +3,7 @@ import copy
 import json
 import uuid
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from apps.accounts.models import User
 from apps.accounts.permissions import require_student
 from django.utils import timezone
@@ -11,7 +11,7 @@ from apps.activities.models import Activity
 from apps.activities.selectors import ensure_activity_open
 from apps.audit.services import record
 from apps.common.errors import Conflict, DomainError
-from .models import Submission, SubmissionRevision
+from .models import Submission, SubmissionRevision, SubmissionTeamMember
 
 DECLARATION_SCHEMA_KEYS = ("project_name", "category", "declaration_type", "team_members")
 
@@ -176,30 +176,139 @@ def is_member_of_submission(submission: Submission | None, student_number: str) 
     return False
 
 
-def map_activity_team_memberships_all(activity_id) -> dict[str, list[Submission]]:
+def _resolve_submission_owner_username(submission: Submission, owner_student_number: str | None = None) -> str:
+    if owner_student_number is not None:
+        return str(owner_student_number or "").strip()
+    cached_owner = submission._state.fields_cache.get("owner")
+    if cached_owner is not None:
+        return str(getattr(cached_owner, "username", "") or "").strip()
+    if submission.owner_id:
+        return str(
+            User.objects.filter(pk=submission.owner_id).values_list("username", flat=True).first() or ""
+        ).strip()
+    return ""
+
+
+def extract_effective_team_members(
+    submission: Submission,
+    *,
+    owner_student_number: str | None = None,
+) -> dict[str, tuple[str, str]]:
+    """提取某条有效团队申报的队员映射：{student_number: (real_name, class_name)}（不含队长本人）。"""
+    if not _is_effective_team_submission(submission):
+        return {}
+    raw_members = submission.draft_data.get("team_members") or []
+    owner_sn = _resolve_submission_owner_username(submission, owner_student_number=owner_student_number)
+    members: dict[str, tuple[str, str]] = {}
+    for item in raw_members:
+        if not isinstance(item, dict):
+            continue
+        sn = str(item.get("student_number") or "").strip()[:64]
+        if not sn or sn == owner_sn or sn in members:
+            continue
+        rn = str(item.get("real_name") or "").strip()[:100]
+        cn = str(item.get("class_name") or "").strip()[:100]
+        members[sn] = (rn, cn)
+    return members
+
+
+def sync_submission_team_members(
+    submission: Submission,
+    *,
+    owner_student_number: str | None = None,
+    is_create: bool = False,
+) -> int:
+    """将 submission.draft_data 中的团队成员差量同步至 SubmissionTeamMember 索引表。"""
+    desired = extract_effective_team_members(submission, owner_student_number=owner_student_number)
+    if not desired:
+        if is_create:
+            return 0
+        SubmissionTeamMember.objects.filter(submission_id=submission.id).delete()
+        return 0
+
+    if is_create:
+        rows = [
+            SubmissionTeamMember(
+                submission_id=submission.id,
+                activity_id=submission.activity_id,
+                student_number=sn,
+                real_name=rn,
+                class_name=cn,
+            )
+            for sn, (rn, cn) in desired.items()
+        ]
+        SubmissionTeamMember.objects.bulk_create(rows, ignore_conflicts=True)
+        return len(rows)
+
+    existing_rows = {
+        row.student_number: row
+        for row in SubmissionTeamMember.objects.filter(submission_id=submission.id)
+    }
+    to_delete_ids = [row.id for sn, row in existing_rows.items() if sn not in desired]
+    if to_delete_ids:
+        SubmissionTeamMember.objects.filter(id__in=to_delete_ids).delete()
+
+    to_create: list[SubmissionTeamMember] = []
+    to_update: list[SubmissionTeamMember] = []
+    now = timezone.now()
+    for sn, (rn, cn) in desired.items():
+        current = existing_rows.get(sn)
+        if current is None:
+            to_create.append(
+                SubmissionTeamMember(
+                    submission_id=submission.id,
+                    activity_id=submission.activity_id,
+                    student_number=sn,
+                    real_name=rn,
+                    class_name=cn,
+                )
+            )
+        elif (
+            current.activity_id != submission.activity_id
+            or current.real_name != rn
+            or current.class_name != cn
+        ):
+            current.activity_id = submission.activity_id
+            current.real_name = rn
+            current.class_name = cn
+            current.updated_at = now
+            to_update.append(current)
+
+    if to_update:
+        SubmissionTeamMember.objects.bulk_update(
+            to_update,
+            ["activity_id", "real_name", "class_name", "updated_at"],
+        )
+    if to_create:
+        SubmissionTeamMember.objects.bulk_create(to_create, ignore_conflicts=True)
+    return len(desired)
+
+
+def map_activity_team_memberships_all(activity_id, *, student_numbers=None) -> dict[str, list[Submission]]:
     """返回指定活动下「队员学号 -> 参与的全部有效团队申报列表（按优先级与更新时间降序）」。"""
     if not activity_id:
         return {}
-    candidates = list(
-        Submission.objects.select_related("owner", "activity")
-        .filter(activity_id=activity_id)
-        .order_by("-updated_at")
-    )
+    qs = SubmissionTeamMember.objects.select_related(
+        "submission__owner",
+        "submission__activity",
+    ).filter(activity_id=activity_id)
+    if student_numbers is not None:
+        sn_list = [str(sn or "").strip() for sn in student_numbers if str(sn or "").strip()]
+        if not sn_list:
+            return {}
+        qs = qs.filter(student_number__in=sn_list)
+
     membership: dict[str, list[Submission]] = {}
-    for sub in candidates:
-        if not _is_effective_team_submission(sub):
-            continue
+    seen_pairs: set[tuple[str, uuid.UUID]] = set()
+    for row in qs:
+        sub = row.submission
+        sn = str(row.student_number or "").strip()
         owner_sn = str(sub.owner.username or "").strip()
-        seen_in_sub: set[str] = set()
-        for member in sub.draft_data.get("team_members") or []:
-            if not isinstance(member, dict):
-                continue
-            sn = str(member.get("student_number") or "").strip()
-            if not sn or sn == owner_sn or sn in seen_in_sub:
-                continue
-            seen_in_sub.add(sn)
-            membership.setdefault(sn, []).append(sub)
-    for sn, subs in membership.items():
+        if not sn or sn == owner_sn or (sn, sub.id) in seen_pairs:
+            continue
+        seen_pairs.add((sn, sub.id))
+        membership.setdefault(sn, []).append(sub)
+    for subs in membership.values():
         subs.sort(key=_team_submission_priority, reverse=True)
     return membership
 
@@ -211,12 +320,47 @@ def map_activity_team_memberships(activity_id) -> dict[str, Submission]:
 
 
 def find_team_membership_submissions(*, activity, student_number: str) -> list[Submission]:
-    """查找某学生在指定活动下作为队员归属的全部团队申报列表。"""
+    """查找某学生在指定活动下作为队员归属的全部团队申报列表（走联合索引）。"""
     target = str(student_number or "").strip()
     if activity is None or not target:
         return []
     activity_id = getattr(activity, "id", activity)
-    return list(map_activity_team_memberships_all(activity_id).get(target, []))
+    rows = SubmissionTeamMember.objects.select_related(
+        "submission__owner",
+        "submission__activity",
+    ).filter(activity_id=activity_id, student_number=target)
+    seen_ids: set[uuid.UUID] = set()
+    subs: list[Submission] = []
+    for row in rows:
+        sub = row.submission
+        if sub.id in seen_ids or str(sub.owner.username or "").strip() == target:
+            continue
+        seen_ids.add(sub.id)
+        subs.append(sub)
+    subs.sort(key=_team_submission_priority, reverse=True)
+    return subs
+
+
+def find_all_team_membership_submissions(student_number: str) -> dict[uuid.UUID, list[Submission]]:
+    """一次索引查询获取某学生在所有活动下作为队员归属的团队申报映射：{activity_id: [Submission, ...]}。"""
+    target = str(student_number or "").strip()
+    if not target:
+        return {}
+    rows = SubmissionTeamMember.objects.select_related(
+        "submission__owner",
+        "submission__activity",
+    ).filter(student_number=target)
+    grouped: dict[uuid.UUID, list[Submission]] = {}
+    seen_ids: set[uuid.UUID] = set()
+    for row in rows:
+        sub = row.submission
+        if sub.id in seen_ids or str(sub.owner.username or "").strip() == target:
+            continue
+        seen_ids.add(sub.id)
+        grouped.setdefault(row.activity_id, []).append(sub)
+    for subs in grouped.values():
+        subs.sort(key=_team_submission_priority, reverse=True)
+    return grouped
 
 
 def find_team_membership_submission(*, activity, student_number: str) -> Submission | None:
@@ -226,24 +370,15 @@ def find_team_membership_submission(*, activity, student_number: str) -> Submiss
 
 
 def find_team_membership_activity_ids(student_number: str) -> set[uuid.UUID]:
-    """查找某学生作为队员归属团队申报的所有活动 ID。"""
+    """查找某学生作为队员归属团队申报的所有活动 ID（走 (student_number, activity) 联合索引）。"""
     target = str(student_number or "").strip()
     if not target:
         return set()
-    act_ids: set[uuid.UUID] = set()
-    candidates = (
-        Submission.objects.select_related("owner")
-        .exclude(owner__username=target)
-        .exclude(draft_data={})
+    return set(
+        SubmissionTeamMember.objects.filter(student_number=target)
+        .values_list("activity_id", flat=True)
+        .distinct()
     )
-    for sub in candidates:
-        if not _is_effective_team_submission(sub):
-            continue
-        for member in sub.draft_data.get("team_members") or []:
-            if isinstance(member, dict) and str(member.get("student_number") or "").strip() == target:
-                act_ids.add(sub.activity_id)
-                break
-    return act_ids
 
 
 def is_empty_draft_submission(submission: Submission | None) -> bool:
@@ -256,44 +391,58 @@ def is_empty_draft_submission(submission: Submission | None) -> bool:
 
 
 def redundant_member_draft_ids(activity_ids) -> list[uuid.UUID]:
-    """返回冗余空白占位草稿 ID（已被纳入团队或同人同活动已有其他有效申报时，避免审核队列出现空白占位行）。"""
+    """返回冗余空白占位草稿 ID（单 SQL 条件与索引子查询，不再全表拉取申报和上传记录进内存）。"""
     from apps.uploads.models import FileAsset, UploadSession
 
     act_id_list = [aid for aid in (activity_ids or []) if aid]
     if not act_id_list:
         return []
-    subs = list(
-        Submission.objects.select_related("owner")
-        .filter(activity_id__in=act_id_list)
-    )
-    uploaded_sub_ids = set(
+
+    has_own_valid_upload = Exists(
         UploadSession.objects.filter(
-            submission_id__in=[sub.id for sub in subs],
+            submission_id=OuterRef("pk"),
             status=UploadSession.Status.COMPLETE,
             fileasset__status=FileAsset.Status.VALID,
-        ).values_list("submission_id", flat=True)
+        )
     )
-    members_by_act: dict[object, set[str]] = {}
-    effective_owners_by_act: dict[object, set[str]] = {}
-    for sub in subs:
-        owner_sn = str(sub.owner.username or "").strip()
-        if not is_empty_draft_submission(sub) or sub.id in uploaded_sub_ids:
-            effective_owners_by_act.setdefault(sub.activity_id, set()).add(owner_sn)
-        if not _is_effective_team_submission(sub):
-            continue
-        bucket = members_by_act.setdefault(sub.activity_id, set())
-        for member in sub.draft_data.get("team_members") or []:
-            if isinstance(member, dict):
-                sn = str(member.get("student_number") or "").strip()
-                if sn and sn != owner_sn:
-                    bucket.add(sn)
-    redundant: list[uuid.UUID] = []
-    for sub in subs:
-        if is_empty_draft_submission(sub) and sub.id not in uploaded_sub_ids:
-            owner_sn = str(sub.owner.username or "").strip()
-            if owner_sn in members_by_act.get(sub.activity_id, ()) or owner_sn in effective_owners_by_act.get(sub.activity_id, ()):
-                redundant.append(sub.id)
-    return redundant
+    is_team_member = Exists(
+        SubmissionTeamMember.objects.filter(
+            activity_id=OuterRef("activity_id"),
+            student_number=OuterRef("owner__username"),
+        ).exclude(submission_id=OuterRef("pk"))
+    )
+    has_other_effective_sub = Exists(
+        Submission.objects.filter(
+            activity_id=OuterRef("activity_id"),
+            owner_id=OuterRef("owner_id"),
+        )
+        .exclude(pk=OuterRef("pk"))
+        .filter(
+            ~Q(
+                status=Submission.Status.DRAFT,
+                declaration_submitted=False,
+                draft_data={},
+            )
+            | Exists(
+                UploadSession.objects.filter(
+                    submission_id=OuterRef("pk"),
+                    status=UploadSession.Status.COMPLETE,
+                    fileasset__status=FileAsset.Status.VALID,
+                )
+            )
+        )
+    )
+    return list(
+        Submission.objects.filter(
+            activity_id__in=act_id_list,
+            status=Submission.Status.DRAFT,
+            declaration_submitted=False,
+            draft_data={},
+        )
+        .exclude(has_own_valid_upload)
+        .filter(is_team_member | has_other_effective_sub)
+        .values_list("id", flat=True)
+    )
 
 
 def ensure_no_duplicate_participants(*, activity, submission, owner, draft_data):
@@ -354,7 +503,12 @@ def save_draft(*, actor, submission_id, expected_version, data):
     validate_category_for_activity(activity=submission.activity, draft_data=normalized_data)
     submission.draft_data = normalized_data
     submission.version += 1
-    submission.save(update_fields=["draft_data", "version", "updated_at"])
+    submission._skip_team_member_sync = True
+    try:
+        submission.save(update_fields=["draft_data", "version", "updated_at"])
+    finally:
+        submission._skip_team_member_sync = False
+    sync_submission_team_members(submission, owner_student_number=actor.username)
     record(actor=actor, action="submission.draft_saved", target=submission, metadata={"version": submission.version})
     return submission
 
@@ -409,7 +563,12 @@ def submit_declaration(*, actor, submission_id):
         update_fields.extend(["status", "is_late_submission"])
 
     submission.version += 1
-    submission.save(update_fields=update_fields)
+    submission._skip_team_member_sync = True
+    try:
+        submission.save(update_fields=update_fields)
+    finally:
+        submission._skip_team_member_sync = False
+    sync_submission_team_members(submission, owner_student_number=actor.username)
     record(
         actor=actor,
         action="submission.declaration_submitted",
@@ -461,17 +620,22 @@ def submit_for_review(*, actor, submission_id, request_key=None):
         submission.declaration_submitted = True
         submission.declaration_submitted_at = timezone.now()
     submission.version += 1
-    submission.save(
-        update_fields=[
-            "draft_data",
-            "status",
-            "declaration_submitted",
-            "declaration_submitted_at",
-            "is_late_submission",
-            "version",
-            "updated_at",
-        ]
-    )
+    submission._skip_team_member_sync = True
+    try:
+        submission.save(
+            update_fields=[
+                "draft_data",
+                "status",
+                "declaration_submitted",
+                "declaration_submitted_at",
+                "is_late_submission",
+                "version",
+                "updated_at",
+            ]
+        )
+    finally:
+        submission._skip_team_member_sync = False
+    sync_submission_team_members(submission, owner_student_number=actor.username)
     record(
         actor=actor,
         action="submission.submitted",
@@ -597,6 +761,7 @@ def delete_submission(*, actor, submission_id) -> dict:
     NewsDraft.objects.filter(submission=submission).delete()
     ReviewRecord.objects.filter(Q(submission=submission) | Q(revision__submission=submission)).delete()
     SubmissionRevision.objects.filter(submission=submission).delete()
+    SubmissionTeamMember.objects.filter(submission=submission).delete()
 
     deleted_info = {
         "id": str(submission.id),

@@ -1,4 +1,4 @@
-# 学院社会实践材料平台 - 本地快速调试脚本
+﻿# 学院社会实践材料平台 - 本地快速调试脚本
 $ErrorActionPreference = "Stop"
 Set-Location "$PSScriptRoot\mainbody"
 
@@ -10,6 +10,9 @@ Write-Host "========================================================" -Foregroun
 if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
     Write-Error "未找到虚拟环境 .venv\Scripts\python.exe"
 }
+
+Write-Host "[*] 检查并同步数据库迁移..." -ForegroundColor Green
+.\.venv\Scripts\python.exe manage.py migrate --noinput
 
 Write-Host "[*] 启动服务中..." -ForegroundColor Green
 Write-Host "[*] 本地浏览器访问: http://127.0.0.1:8080/" -ForegroundColor Yellow

@@ -527,13 +527,12 @@ def verify_image_file(path, extension: str) -> None:
 
 
 def _ffprobe_binary() -> str:
-    return str(getattr(settings, "UPLOAD_FFPROBE_BIN", "ffprobe") or "").strip()
+    return str(getattr(settings, "UPLOAD_FFPROBE_BIN", "") or "").strip()
 
 
 def verify_video_file(path, extension: str, *, declared_bytes: int | None = None) -> str:
-    """视频容器校验：能跑 ffprobe 就用它；跑不了就降级并打 warning。
-
-    返回 probed 或 degraded，便于调用方把降级事实写进日志/审计。
+    """视频容器校验：默认关闭耗时 ffprobe，保留魔数+扩展名+大小校验；
+    仅当显式配置 UPLOAD_FFPROBE_BIN 时才执行外部探测，找不到可执行文件则降级并打 warning。
     """
     ext = normalize_extension(extension)
     if ext not in VIDEO_EXTENSIONS:
@@ -541,9 +540,14 @@ def verify_video_file(path, extension: str, *, declared_bytes: int | None = None
     disk_path = Path(path)
     head, _ = _read_head_and_tail(disk_path)
     validate_magic_bytes(head, ext)
+    if disk_path.stat().st_size <= 0:
+        raise DomainError("视频文件内容为空。")
 
     binary = _ffprobe_binary()
-    resolved = shutil.which(binary) if binary else None
+    if not binary:
+        return "disabled"
+
+    resolved = shutil.which(binary)
     if not resolved:
         logger.warning(
             "video_probe_degraded",
@@ -554,9 +558,6 @@ def verify_video_file(path, extension: str, *, declared_bytes: int | None = None
                 "path_name": disk_path.name,
             },
         )
-        # 降级路径：魔数 + 扩展名 + 大小已由上层校验，这里只确认文件非空。
-        if disk_path.stat().st_size <= 0:
-            raise DomainError("视频文件内容为空。")
         return "degraded"
 
     command = [

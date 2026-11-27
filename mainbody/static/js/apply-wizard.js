@@ -23,7 +23,7 @@
   var CAN_SUBMIT = wizard.dataset.canSubmit === 'true';
   var DECLARATION_SUBMITTED = wizard.dataset.declarationSubmitted === 'true';
   var currentVersion = parseInt(wizard.dataset.version || '0', 10) || 0;
-  // 上传通道：宣讲视频走 5MB 分片，其余材料单请求直传（服务端 URL 全部由模板注入）。
+  // 上传通道：宣讲视频以及所有 >10MB 的大文件（.zip / .pdf 等）统一走 5MB 分片，其余小文件单请求直传。
   var CHUNK_START_URL = wizard.dataset.chunkStartUrl || '/api/v1/uploads/chunk-start/';
   var CHUNK_UPLOAD_URL = wizard.dataset.chunkUploadUrl || '/api/v1/uploads/chunk-upload/';
   var CHUNK_COMPLETE_URL = wizard.dataset.chunkCompleteUrl || '/api/v1/uploads/chunk-complete/';
@@ -32,6 +32,7 @@
   var SUBMISSION_ID = wizard.dataset.submissionId || '';
   var UPLOAD_LOCKED = wizard.dataset.uploadLocked === 'true';
   var CHUNK_SIZE = 5 * 1024 * 1024;
+  var CHUNK_THRESHOLD_BYTES = 10 * 1024 * 1024;
   var uploadJobs = {};
   var uploadSeq = 0;
   var savedUploadsByCode = {};
@@ -673,8 +674,8 @@
   }
 
   /* ------------------------------------------------------------------
-   * 上传通道：宣讲视频 -> chunkStart / chunkUpload x N / chunkComplete
-   *           其余材料 -> 单请求 direct-upload
+   * 上传通道：宣讲视频与所有 >10MB 大文件（.zip / .pdf 等）-> chunkStart / chunkUpload x N / chunkComplete
+   *           其余小文件（≤10MB）-> 单请求 direct-upload
    * 两条通道共用顶部 Tabler 进度条与「上传中勿关闭页面」提醒。
    * ------------------------------------------------------------------ */
   function renderUploadProgress() {
@@ -812,11 +813,16 @@
   }
 
   // 只对网络错误 / 5xx 重试；4xx 是业务拒绝，重试没有意义。
-  function retrying(taskFactory, attempts) {
+  function retrying(taskFactory, attempts, isStopped) {
     var remaining = attempts || 3;
     function run() {
+      if (isStopped && isStopped()) {
+        var cancelled = new Error('上传已取消。');
+        cancelled.aborted = true;
+        return Promise.reject(cancelled);
+      }
       return taskFactory().catch(function (err) {
-        var permanent = err && (err.aborted || (err.status && err.status >= 400 && err.status < 500));
+        var permanent = (isStopped && isStopped()) || (err && (err.aborted || (err.status && err.status >= 400 && err.status < 500)));
         if (permanent || remaining <= 1) {
           throw err;
         }
@@ -831,8 +837,8 @@
 
   function makeUploadProcess(config) {
     return function (fieldName, file, metadata, load, error, progress, abort) {
-      if (config && config.code === 'video') {
-        return chunkedUpload(config, file, load, error, progress);
+      if ((config && config.code === 'video') || (file && Number(file.size) > CHUNK_THRESHOLD_BYTES)) {
+        return chunkedUpload(config, file, load, error, progress, abort);
       }
       return directUpload(config, file, load, error, progress);
     };
@@ -878,17 +884,44 @@
     return { abort: function () { request.abort(); } };
   }
 
-  function chunkedUpload(config, file, load, error, progress) {
+  function chunkedUpload(config, file, load, error, progress, onAbort) {
     var job = startUploadJob(file.size);
     var controllers = [];
     var stopped = false;
+    var completed = false;
+    var releaseSent = false;
     var uploadId = '';
     var chunkSize = CHUNK_SIZE;
     var received = {};
     var uploadedBytes = 0;
 
+    function releaseChunkSession(id) {
+      if (!id || completed || releaseSent) {
+        return;
+      }
+      releaseSent = true;
+      try {
+        fetch('/api/v1/uploads/' + encodeURIComponent(id) + '/delete/', {
+          method: 'POST',
+          credentials: 'same-origin',
+          keepalive: true,
+          headers: {
+            'X-CSRFToken': CSRF_TOKEN,
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        }).catch(function () {
+          /* 取消释放尽力而为，服务端 chunk-start 亦有单文件会话自动清理兜底 */
+        });
+      } catch (err) {
+        /* 忽略环境异常 */
+      }
+    }
+
     function cancel() {
       stopped = true;
+      if (uploadId && !completed) {
+        releaseChunkSession(uploadId);
+      }
       controllers.forEach(function (item) {
         try {
           item.abort();
@@ -896,6 +929,10 @@
           /* 已经结束的请求忽略 */
         }
       });
+      finishUploadJob(job);
+      if (typeof onAbort === 'function') {
+        onAbort();
+      }
     }
 
     function report(bytes) {
@@ -924,7 +961,9 @@
       var index = 0;
       function next() {
         if (stopped) {
-          return Promise.reject(new Error('上传已取消。'));
+          var cancelled = new Error('上传已取消。');
+          cancelled.aborted = true;
+          return Promise.reject(cancelled);
         }
         if (index >= totalChunks) {
           return Promise.resolve();
@@ -938,12 +977,12 @@
           report(end - start);
           return next();
         }
-        return retrying(function () { return sendPart(current); }).then(next);
+        return retrying(function () { return sendPart(current); }, 3, function () { return stopped; }).then(next);
       }
       return next();
     }
 
-    postForm(CHUNK_START_URL, {
+    var startRequest = postForm(CHUNK_START_URL, {
       material_type: config.code,
       filename: file.name,
       file_size: file.size,
@@ -951,10 +990,21 @@
       requirement_id: config.requirement_id,
       activity_id: ACTIVITY_ID,
       submission_id: SUBMISSION_ID
-    }).promise
+    });
+    controllers.push(startRequest);
+
+    startRequest.promise
       .then(function (res) {
         var data = (res && res.data) || {};
-        uploadId = data.upload_id;
+        uploadId = data.upload_id || '';
+        if (stopped) {
+          if (uploadId) {
+            releaseChunkSession(uploadId);
+          }
+          var cancelled = new Error('上传已取消。');
+          cancelled.aborted = true;
+          throw cancelled;
+        }
         if (!uploadId) {
           throw new Error('服务端未返回 upload_id，无法继续分片上传。');
         }
@@ -967,13 +1017,19 @@
         return uploadAll(totalChunks);
       })
       .then(function () {
+        if (stopped) {
+          var cancelled = new Error('上传已取消。');
+          cancelled.aborted = true;
+          throw cancelled;
+        }
         return retrying(function () {
           var request = postForm(CHUNK_COMPLETE_URL, { upload_id: uploadId, material_type: config.code });
           controllers.push(request);
           return request.promise;
-        }, 2);
+        }, 2, function () { return stopped; });
       })
       .then(function (res) {
+        completed = true;
         // FilePond 要求 load 之前把进度推到 100%，否则条目会停在半程状态
         if (progress) {
           progress(true, file.size, file.size);
@@ -993,7 +1049,9 @@
       })
       .catch(function (err) {
         finishUploadJob(job);
-        error(err && err.message ? err.message : '分片上传失败，请重试。');
+        if (!stopped) {
+          error(err && err.message ? err.message : '分片上传失败，请重试。');
+        }
       });
 
     return { abort: cancel };
@@ -1160,7 +1218,45 @@
     }
   }
 
+  var summaryObjectUrls = [];
+
+  function revokeSummaryObjectUrls() {
+    if (!summaryObjectUrls.length) {
+      return;
+    }
+    summaryObjectUrls.forEach(function (url) {
+      try {
+        if (window.URL && typeof window.URL.revokeObjectURL === 'function') {
+          window.URL.revokeObjectURL(url);
+        }
+      } catch (err) {
+        /* 忽略浏览器清理异常 */
+      }
+    });
+    summaryObjectUrls = [];
+  }
+
+  window.addEventListener('beforeunload', revokeSummaryObjectUrls);
+
+  function focusFirstInvalidInStep(step) {
+    var targetPanel = document.querySelector('.wizard-panel[data-step="' + step + '"]');
+    if (!targetPanel) {
+      return;
+    }
+    var invalidField = targetPanel.querySelector('.is-invalid');
+    var scrollTarget = invalidField || targetPanel;
+    if (scrollTarget && typeof scrollTarget.scrollIntoView === 'function') {
+      scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    if (invalidField && typeof invalidField.focus === 'function') {
+      window.setTimeout(function () {
+        invalidField.focus();
+      }, 60);
+    }
+  }
+
   function renderSummary() {
+    revokeSummaryObjectUrls();
     setSummary('project_name', fieldProjectName.value.trim());
     setSummary('category', fieldCategory ? fieldCategory.value.trim() : '');
     setSummary('advisor_name', fieldAdvisor.value.trim());
@@ -1208,7 +1304,9 @@
               var isImgExt = ['.jpg', '.jpeg', '.png'].indexOf(file.ext) !== -1;
               var thumb;
               if (isImgExt && file.native) {
-                thumb = '<img src="' + window.URL.createObjectURL(file.native) + '" alt="' + escapeHtml(file.name) + '" class="apply-thumb">';
+                var objectUrl = window.URL.createObjectURL(file.native);
+                summaryObjectUrls.push(objectUrl);
+                thumb = '<img src="' + objectUrl + '" alt="' + escapeHtml(file.name) + '" class="apply-thumb">';
               } else if (isImgExt && file.isSaved && file.previewUrl) {
                 thumb = '<img src="' + escapeHtml(file.previewUrl) + '" alt="' + escapeHtml(file.name) + '" class="apply-thumb">';
               } else {
@@ -1262,12 +1360,20 @@
     var payload = collectDraftPayload();
     if (!payload.project_name) {
       flag(fieldProjectName, false);
+      if (currentStep !== 1) {
+        showStep(1, { skipValidation: true });
+      }
+      focusFirstInvalidInStep(1);
       if (!silent) {
         showDraftFeedback('请至少填写项目名称后再保存草稿。', true);
       }
       return Promise.reject(new Error('请先填写项目名称。'));
     }
     if (payload.declaration_type === 'team' && payload.team_members.length > 0 && !validateStepTwo()) {
+      if (currentStep !== 2) {
+        showStep(2, { skipValidation: true });
+      }
+      focusFirstInvalidInStep(2);
       if (!silent) {
         showDraftFeedback('团队成员的学号、姓名与班级均不能为空。', true);
       }
@@ -1417,12 +1523,22 @@
       showSubmitError('当前没有可提交的申报记录（请确认活动是否开放，或刷新页面后重试）。');
       return;
     }
-    if (!validateStepOne() || !validateStepTwo()) {
-      showSubmitError('表单信息不完整，请返回对应步骤补全后再提交。');
+    if (!validateStepOne()) {
+      showSubmitError('第 1 步「基本信息」尚未填写完整，已为您自动跳回该步骤，请补全标红项后再提交。');
+      showStep(1, { skipValidation: true });
+      focusFirstInvalidInStep(1);
+      return;
+    }
+    if (!validateStepTwo()) {
+      showSubmitError('第 2 步「团队成员」信息不完整，已为您自动跳回该步骤，请补全标红项后再提交。');
+      showStep(2, { skipValidation: true });
+      focusFirstInvalidInStep(2);
       return;
     }
     if (!validateStepThree()) {
-      showSubmitError('请先上传 1 份 .docx 格式的项目申报表后再提交申报。');
+      showSubmitError('第 3 步「申报材料」尚未齐全，已为您自动跳回该步骤，请先上传 1 份 .docx 格式的项目申报表。');
+      showStep(3, { skipValidation: true });
+      focusFirstInvalidInStep(3);
       return;
     }
     hideSubmitError();

@@ -441,26 +441,26 @@ def test_admin_activity_config_whitelist_and_export_ui(client, activity, db):
     activity.refresh_from_db()
     assert activity.late_whitelist_student_numbers == ["20250999"]
 
-    # 4) 白名单学生 20250999 登录后在活动截止后仍可在工作台正常保存草稿
+    # 4) 白名单学生 20250999 登录后访问首页（不自动写库建草稿），首次保存时按需创建草稿并保存成功
     client.force_login(late_student)
     late_wb = client.get(f"/?activity_id={activity.id}")
     assert late_wb.status_code == 200
     late_html = late_wb.content.decode("utf-8")
     assert "本人已在补交白名单内" in late_html
     assert 'data-readonly-locked="true"' not in late_html
+    assert not Submission.objects.filter(owner=late_student, activity=activity).exists()
 
-    late_sub = Submission.objects.get(owner=late_student, activity=activity)
-    client.post(
+    save_resp = client.post(
         "/student/submissions/save/",
         {
             "activity_id": str(activity.id),
-            "submission_id": str(late_sub.id),
-            "expected_version": str(late_sub.version),
             "project_name": "白名单补交调研项目",
             "category": "社会调查",
             "declaration_type": "individual",
         },
     )
+    assert save_resp.status_code == 302
+    late_sub = Submission.objects.get(owner=late_student, activity=activity)
     seed_mandatory_materials(late_student, activity)
     client.post(f"/student/submissions/{late_sub.id}/submit/")
     late_sub.refresh_from_db()

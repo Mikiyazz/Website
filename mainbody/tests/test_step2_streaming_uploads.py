@@ -127,8 +127,10 @@ def test_filename_and_magic_bytes_double_hard_validation(client, student, activi
 # 3. 真实流式上传落盘与重复上传覆盖并物理删除磁盘旧文件测试
 # =====================================================================
 
-def test_direct_upload_and_overwrite_physically_deletes_old_file(client, student, activity):
-    """验证真实文件上传落盘，且重复上传同类单文件材料时数据库更新并调用 os.remove 物理删除磁盘旧文件。"""
+def test_direct_upload_and_overwrite_physically_deletes_old_file(
+    client, student, activity, django_capture_on_commit_callbacks
+):
+    """验证真实文件上传落盘，且重复上传同类单文件材料时数据库更新并在提交后物理删除磁盘旧文件。"""
     reqs = ensure_standard_material_requirements(activity)
     client.force_login(student)
 
@@ -155,15 +157,16 @@ def test_direct_upload_and_overwrite_physically_deletes_old_file(client, student
     quota = StorageQuota.objects.get(owner=student, activity=activity)
     assert quota.used_bytes == len(v1_bytes)
 
-    # 第二次重复上传同一材料类别（申报表 v2），触发覆盖清理机制
+    # 第二次重复上传同一材料类别（申报表 v2），触发覆盖清理机制（on_commit 后删除旧物理文件）
     v2_bytes = b"PK\x03\x04" + b"version-2-updated-docx-payload-" * 30
-    resp2 = client.post(
-        "/api/v1/uploads/direct-upload/",
-        {
-            "requirement_id": str(reqs["application_form"].id),
-            "file": SimpleUploadedFile("申报表_终版.docx", v2_bytes),
-        },
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        resp2 = client.post(
+            "/api/v1/uploads/direct-upload/",
+            {
+                "requirement_id": str(reqs["application_form"].id),
+                "file": SimpleUploadedFile("申报表_终版.docx", v2_bytes),
+            },
+        )
     assert resp2.status_code == 201
     data2 = resp2.json()
     assert str(upload1.id) in data2["replaced_upload_ids"]
@@ -188,8 +191,10 @@ def test_direct_upload_and_overwrite_physically_deletes_old_file(client, student
     assert quota.used_bytes == len(v2_bytes)
 
 
-def test_explicit_delete_attachment_releases_quota_and_removes_disk_file(student, activity):
-    """验证学生显式删除某附件时，释放配额并物理删除磁盘文件。"""
+def test_explicit_delete_attachment_releases_quota_and_removes_disk_file(
+    student, activity, django_capture_on_commit_callbacks
+):
+    """验证学生显式删除某附件时，释放配额并在提交后物理删除磁盘文件。"""
     reqs = ensure_standard_material_requirements(activity)
     photo_bytes = REAL_PNG
     upload, asset, _ = direct_upload(
@@ -200,7 +205,8 @@ def test_explicit_delete_attachment_releases_quota_and_removes_disk_file(student
     disk_path = resolve_file_disk_path(upload.object_key)
     assert os.path.exists(disk_path) is True
 
-    delete_uploaded_file(actor=student, upload_id=upload.id)
+    with django_capture_on_commit_callbacks(execute=True):
+        delete_uploaded_file(actor=student, upload_id=upload.id)
     upload.refresh_from_db()
     asset.refresh_from_db()
     quota = StorageQuota.objects.get(owner=student, activity=activity)

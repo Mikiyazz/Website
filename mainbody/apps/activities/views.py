@@ -122,7 +122,7 @@ def manage_activity(request):
         )
         action_name = "activity.created"
 
-    ensure_standard_material_requirements(act)
+    ensure_standard_material_requirements(act, sync_existing=True)
     record(
         actor=request.user,
         action=action_name,

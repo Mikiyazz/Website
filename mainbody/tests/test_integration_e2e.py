@@ -63,12 +63,21 @@ MP4_HEAD = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 8
 # helpers
 # ---------------------------------------------------------------------
 
-def make_student(username, real_name, class_name="信安25-1班", must_change_password=False):
+def make_student(
+    username,
+    real_name,
+    class_name="信安25-1班",
+    must_change_password=False,
+    grade="",
+    major="",
+):
     return User.objects.create_user(
         username=username,
         password="password123",
         real_name=real_name,
         class_name=class_name,
+        grade=grade,
+        major=major,
         must_change_password=must_change_password,
     )
 
@@ -174,7 +183,7 @@ def create_and_submit(actor, activity, project_name="矿区网络安全调研"):
 # =====================================================================
 
 def test_scenario1_register_login_force_password_change_then_apply(client, activity, db):
-    student_number = "2025990001"
+    student_number = "25990001"
 
     # 1) 注册页可打开，POST 后自动登录；密码留空 = 学号后 6 位
     assert client.get("/accounts/register/").status_code == 200
@@ -183,9 +192,9 @@ def test_scenario1_register_login_force_password_change_then_apply(client, activ
         {
             "student_number": student_number,
             "real_name": "周达",
-            "grade": "大二",
+            "grade": "2025级",
             "major": "信息安全",
-            "class_name": "信安25-1班",
+            "class_name": "01班",
             "phone": "13800138000",
             "password": "",
         },
@@ -618,7 +627,16 @@ def test_scenario7_fake_docx_executable_rejected_by_magic_header(client, activit
 @pytest.mark.django_db
 def test_scenario8_export_ten_submissions_zip_structure(client, activity):
     admin = make_admin("admin_export_e2e")
-    students = [make_student(f"20250800{index:02d}", f"学生{index:02d}") for index in range(1, 11)]
+    students = [
+        make_student(
+            f"250800{index:02d}",
+            f"学生{index:02d}",
+            class_name="01班",
+            grade="2025级",
+            major="信息安全",
+        )
+        for index in range(1, 11)
+    ]
     for index, student in enumerate(students, start=1):
         create_and_submit(student, activity, f"第{index}组社会实践")
 
@@ -645,15 +663,15 @@ def test_scenario8_export_ten_submissions_zip_structure(client, activity):
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = zf.namelist()
         assert len(names) == 10 * 5  # 每人：申报表 1 + 实践报告 1 + 现场照片 3
-        student_dirs = {name.split("/", 1)[0] for name in names}
+        student_dirs = {"/".join(name.split("/", 3)[:3]) for name in names}
         assert len(student_dirs) == 10
         for student in students:
-            expected_dir = f"{student.username}_{student.real_name}"
+            expected_dir = f"2025级/信息安全01班/{student.real_name}+{student.username}"
             assert expected_dir in student_dirs
             own = [name for name in names if name.startswith(expected_dir + "/")]
-            assert f"{expected_dir}/申报表/申报表.docx" in own
-            assert f"{expected_dir}/实践报告/实践报告.pdf" in own
-            photos = [name for name in own if name.startswith(f"{expected_dir}/现场照片/")]
+            assert f"{expected_dir}/申报表.docx" in own
+            assert f"{expected_dir}/实践报告.pdf" in own
+            photos = [name for name in own if name.startswith(f"{expected_dir}/现场照片_")]
             assert len(photos) == 3
         first_docx = next(name for name in names if name.endswith("申报表.docx"))
         assert zf.read(first_docx).startswith(b"PK")

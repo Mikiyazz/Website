@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}
   {% if workbench_role == "student" %}学生材料申报工作台{% elif is_admin_panel %}管理面板{% elif is_college_admin %}学院管理员仪表盘{% else %}团支书初审工作台{% endif %} · 学院社会实践材料平台
 {% endblock %}
@@ -186,18 +187,19 @@
                 <button type="submit" class="btn btn-outline-primary">+ 新建申报</button>
               </form>
               {% endif %}
-              {% if submission %}
+              {% if submission or selected_can_write_now %}
               <a class="btn {% if is_locked %}btn-outline-secondary{% else %}btn-amber{% endif %}"
                  id="btn-go-my-declaration"
-                 href="{% url 'submission-apply-page' %}?activity_id={{ selected_activity.id }}&submission_id={{ submission.id }}">
+                 href="{% url 'submission-apply-page' %}?activity_id={{ selected_activity.id }}{% if submission %}&submission_id={{ submission.id }}{% endif %}">
                 {% if is_locked %}查看我的申报 ↗{% elif student_overview.declaration_submitted %}查看/修改我的申报 ↗{% else %}前往我的申报 ↗{% endif %}
               </a>
               <a class="btn {% if is_locked %}btn-outline-secondary{% else %}btn-primary{% endif %}"
                  id="btn-go-my-outcomes"
-                 href="{% url 'submission-outcomes-page' %}?activity_id={{ selected_activity.id }}&submission_id={{ submission.id }}">
+                 href="{% url 'submission-outcomes-page' %}?activity_id={{ selected_activity.id }}{% if submission %}&submission_id={{ submission.id }}{% endif %}">
                 {% if is_returned %}前往成果收集修改重交 ↗{% elif is_locked %}查看成果收集 ↗{% else %}前往成果收集 ↗{% endif %}
               </a>
-              {% if can_delete_current %}
+              {% endif %}
+              {% if submission and can_delete_current %}
               <form method="post"
                     action="{% url 'submission-delete-page' submission.id %}"
                     class="m-0"
@@ -207,7 +209,6 @@
                 <input type="hidden" name="next" value="dashboard">
                 <button type="submit" class="btn btn-outline-danger" id="btn-delete-current-submission">删除申报</button>
               </form>
-              {% endif %}
               {% endif %}
             </div>
           </div>
@@ -787,7 +788,7 @@
             <div class="charcoal-check-meta" style="min-width: 0;">
               <span class="charcoal-check-title text-truncate">{{ item.project_name|default:"（未命名项目）" }}</span>
               <span class="charcoal-check-sub text-truncate">
-                {{ item.real_name|default:item.student_number }} · {{ item.class_name|default:"-" }} · {{ item.status_display }}
+                {{ item.real_name|default:item.student_number }} · {{ item.class_display|default:item.class_name|default:"-" }} · {{ item.status_display }}
               </span>
             </div>
             <span class="charcoal-check-dot {% if item.status == 'final_approved' %}is-done{% endif %}"
@@ -949,184 +950,112 @@
             <th>操作</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody>{% spaceless %}
           {% for item in submission_items %}
           <tr data-submission-row="{{ item.id }}">
             <td class="tabular-nums text-secondary">{{ item.student_number }}</td>
             <td><strong>{{ item.real_name|default:item.student_number }}</strong></td>
-            <td>{{ item.class_name }}</td>
+            <td>{{ item.class_display|default:item.class_name|default:"-" }}</td>
             <td>{{ item.project_name|default:"（未命名项目）" }}</td>
             <td>{{ item.category|default:"-" }}</td>
             <td>{{ item.declaration_type_display }}</td>
             <td class="tabular-nums">{{ item.attachments|length }} 份</td>
-            <td>
-              <span class="badge badge-{{ item.status }}">{{ item.status_display }}</span>
-            </td>
-            <td>
-              <div class="d-flex gap-1 flex-wrap">
-                <button type="button" class="btn btn-sm btn-primary" onclick="toggleReviewDrawer('{{ item.id }}')">审核详情抽屉</button>
-                <a class="btn btn-sm btn-outline-secondary" href="{% url 'review-submission-detail' item.id %}">详情页</a>
-              </div>
-            </td>
+            <td><span class="badge badge-{{ item.status }}">{{ item.status_display }}</span></td>
+            <td><div class="d-flex gap-1 flex-wrap"><button type="button" class="btn btn-sm btn-primary" onclick="toggleReviewDrawer('{{ item.id }}')">审核详情抽屉</button><a class="btn btn-sm btn-outline-secondary" href="{% url 'review-submission-detail' item.id %}">详情页</a></div></td>
           </tr>
-          <!-- 审核详情抽屉 -->
           <tr id="drawer-row-{{ item.id }}" style="{% if not item.is_drawer_open %}display:none;{% endif %}">
-            <td colspan="9" class="p-0 border-0">
-              <div class="drawer-panel" data-drawer-submission="{{ item.id }}">
-                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                  <h3 class="h3 mb-0">
-                    申报详情与审核 · {{ item.project_name|default:"未命名项目" }}
-                    <span class="badge badge-{{ item.status }} ms-1">{{ item.status_display }}</span>
-                  </h3>
-                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleReviewDrawer('{{ item.id }}')">收起抽屉</button>
-                </div>
-
-                <!-- 1. 项目信息与申报人信息 -->
-                <div class="row g-3 mb-3">
-                  <div class="col-12 col-md-6">
-                    <p class="mb-1"><strong>申报人：</strong>{{ item.real_name }}（学号：<span class="tabular-nums">{{ item.student_number }}</span>）</p>
-                    <p class="mb-1"><strong>年级/专业/班级：</strong>{{ item.grade|default:"-" }} / {{ item.major|default:"-" }} / {{ item.class_name }}</p>
-                    <p class="mb-1"><strong>联系电话：</strong><span class="tabular-nums">{{ item.phone|default:"-" }}</span></p>
-                  </div>
-                  <div class="col-12 col-md-6">
-                    <p class="mb-1"><strong>项目名称：</strong>{{ item.project_name|default:"-" }}</p>
-                    <p class="mb-1"><strong>项目类别：</strong>{{ item.category|default:"-" }}</p>
-                    <p class="mb-1"><strong>申报形式：</strong>{{ item.declaration_type_display }}</p>
-                  </div>
-                </div>
-
-                <!-- 2. 团队成员列表 -->
-                {% if item.team_members %}
-                <div class="mb-3">
-                  <strong>团队成员名单（共 {{ item.team_members|length }} 名队员）：</strong>
-                  <div class="table-responsive mt-2">
-                    <table class="table table-vcenter table-sm">
-                      <thead>
-                        <tr>
-                          <th>队员学号</th>
-                          <th>队员姓名</th>
-                          <th>队员班级</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {% for tm in item.team_members %}
-                        <tr>
-                          <td class="tabular-nums">{{ tm.student_number }}</td>
-                          <td>{{ tm.real_name }}</td>
-                          <td>{{ tm.class_name }}</td>
-                        </tr>
-                        {% endfor %}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-                {% endif %}
-
-                <!-- 3. 全部附件列表 -->
-                <div class="mb-3">
-                  <strong>已上传附件材料清单（{{ item.attachments|length }} 份）：</strong>
-                  <ul class="uploaded-file-list">
-                    {% for att in item.attachments %}
-                    <li class="uploaded-file-item">
-                      <div>
-                        <span class="badge badge-optional">{{ att.requirement_title }}</span>
-                        <strong class="ms-1">{{ att.original_name }}</strong>
-                      </div>
-                      <div class="d-flex gap-2 align-items-center flex-wrap">
-                        {% if att.can_inline_preview %}
-                        <a class="btn btn-sm btn-outline-secondary preview-online-btn"
-                           href="{{ att.preview_url }}"
-                           target="_blank"
-                           rel="noopener">
-                          浏览器新窗口在线预览
-                        </a>
-                        <a class="btn btn-sm btn-outline-secondary" href="{{ att.download_url }}">下载文件</a>
-                        {% else %}
-                        <a class="btn btn-sm btn-outline-secondary download-only-btn" href="{{ att.download_url }}">下载查看</a>
-                        {% endif %}
-                      </div>
-                    </li>
-                    {% empty %}
-                    <li class="small text-secondary py-2" style="list-style:none;">该申报暂未上传有效附件。</li>
-                    {% endfor %}
-                  </ul>
-                </div>
-
-                <!-- 4. 审核操作区 -->
-                {% if item.can_first_review or item.can_final_review or item.can_return_approved %}
-                <div class="border-top pt-3 mt-2">
-                  <form method="post"
-                        action="{% url 'review-submission-action' item.id %}"
-                        class="review-action-form"
-                        id="review-form-{{ item.id }}"
-                        data-requires-confirm="{% if item.requires_return_confirm %}true{% else %}false{% endif %}"
-                        data-status-label="{{ item.status_display }}"
-                        data-project-name="{{ item.project_name|default:'未命名项目' }}"
-                        onsubmit="return validateReviewActionForm(this)">
-                    {% csrf_token %}
-                    <input type="hidden" name="activity_id" value="{{ item.activity_id }}">
-                    <input type="hidden" name="decision" value="{% if item.can_first_review or item.can_final_review %}approved{% else %}returned{% endif %}" class="decision-input">
-                    <input type="hidden" name="confirm_return" value="" class="confirm-return-input">
-                    <div class="mb-3 form-row">
-                      <label class="form-label" for="comment-{{ item.id }}">
-                        审核意见（打回修改时<strong>必须填写打回意见</strong>）
-                      </label>
-                      <textarea class="form-control"
-                                name="comment"
-                                id="comment-{{ item.id }}"
-                                rows="2"
-                                placeholder="请填写审核意见；若打回修改，请详细写明需修改或补交的具体问题..."></textarea>
-                    </div>
-                    <div class="d-flex flex-wrap gap-2">
-                      {% if item.can_first_review %}
-                      <button type="submit"
-                              class="btn btn-success"
-                              onclick="setReviewDecision(this.form, 'approved')">
-                        初审通过（流转至待终审）
-                      </button>
-                      <button type="submit"
-                              class="btn btn-danger"
-                              onclick="setReviewDecision(this.form, 'returned')">
-                        打回修改（必填打回意见）
-                      </button>
-                      {% elif item.can_final_review %}
-                      <button type="submit"
-                              class="btn btn-success"
-                              onclick="setReviewDecision(this.form, 'approved')">
-                        终审通过（正式归档）
-                      </button>
-                      <button type="submit"
-                              class="btn btn-danger"
-                              onclick="setReviewDecision(this.form, 'returned')">
-                        打回修改（必填打回意见）
-                      </button>
-                      {% elif item.can_return_approved %}
-                      <button type="submit"
-                              class="btn btn-danger"
-                              onclick="setReviewDecision(this.form, 'returned')">
-                        打回修改（必填打回意见）
-                      </button>
-                      {% endif %}
-                    </div>
-                  </form>
-                </div>
-                {% else %}
-                <p class="small text-secondary mt-2 mb-0">
-                  当前状态为【{{ item.status_display }}】，无需您执行审核操作。
-                </p>
-                {% endif %}
+            <td colspan="9" class="p-0 border-0"><div class="drawer-panel" data-drawer-submission="{{ item.id }}">
+              <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                <h3 class="h3 mb-0">申报详情与审核 · {{ item.project_name|default:"未命名项目" }}<span class="badge badge-{{ item.status }} ms-1">{{ item.status_display }}</span></h3>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleReviewDrawer('{{ item.id }}')">收起抽屉</button>
               </div>
-            </td>
+              <div class="row g-3 mb-3">
+                <div class="col-12 col-md-6">
+                  <p class="mb-1"><strong>申报人：</strong>{{ item.real_name }}（学号：<span class="tabular-nums">{{ item.student_number }}</span>）</p>
+                  <p class="mb-1"><strong>年级/专业/班级：</strong>{{ item.grade|default:"-" }} / {{ item.major|default:"-" }} / {{ item.class_name }}</p>
+                  <p class="mb-1"><strong>联系电话：</strong><span class="tabular-nums">{{ item.phone|default:"-" }}</span></p>
+                </div>
+                <div class="col-12 col-md-6">
+                  <p class="mb-1"><strong>项目名称：</strong>{{ item.project_name|default:"-" }}</p>
+                  <p class="mb-1"><strong>项目类别：</strong>{{ item.category|default:"-" }}</p>
+                  <p class="mb-1"><strong>申报形式：</strong>{{ item.declaration_type_display }}</p>
+                </div>
+              </div>
+              {% if item.team_members %}
+              <div class="mb-3"><strong>团队成员名单（共 {{ item.team_members|length }} 名队员）：</strong>
+                <div class="table-responsive mt-2"><table class="table table-vcenter table-sm"><thead><tr><th>队员学号</th><th>队员姓名</th><th>队员班级</th></tr></thead><tbody>
+                  {% for tm in item.team_members %}<tr><td class="tabular-nums">{{ tm.student_number }}</td><td>{{ tm.real_name }}</td><td>{{ tm.class_name }}</td></tr>{% endfor %}
+                </tbody></table></div>
+              </div>
+              {% endif %}
+              <div class="mb-3"><strong>已上传附件材料清单（{{ item.attachments|length }} 份）：</strong>
+                <ul class="uploaded-file-list">
+                  {% for att in item.attachments %}
+                  <li class="uploaded-file-item">
+                    <div><span class="badge badge-optional">{{ att.requirement_title }}</span><strong class="ms-1">{{ att.original_name }}</strong></div>
+                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                      {% if att.can_inline_preview %}<a class="btn btn-sm btn-outline-secondary preview-online-btn" href="{{ att.preview_url }}" target="_blank" rel="noopener">浏览器新窗口在线预览</a><a class="btn btn-sm btn-outline-secondary" href="{{ att.download_url }}">下载文件</a>{% else %}<a class="btn btn-sm btn-outline-secondary download-only-btn" href="{{ att.download_url }}">下载查看</a>{% endif %}
+                    </div>
+                  </li>
+                  {% empty %}<li class="small text-secondary py-2" style="list-style:none;">该申报暂未上传有效附件。</li>{% endfor %}
+                </ul>
+              </div>
+              {% if item.can_first_review or item.can_final_review or item.can_return_approved %}
+              <div class="border-top pt-3 mt-2">
+                <form method="post" action="{% url 'review-submission-action' item.id %}" class="review-action-form" id="review-form-{{ item.id }}" data-requires-confirm="{% if item.requires_return_confirm %}true{% else %}false{% endif %}" data-status-label="{{ item.status_display }}" data-project-name="{{ item.project_name|default:'未命名项目' }}" onsubmit="return validateReviewActionForm(this)">
+                  {% csrf_token %}<input type="hidden" name="activity_id" value="{{ item.activity_id }}"><input type="hidden" name="decision" value="{% if item.can_first_review or item.can_final_review %}approved{% else %}returned{% endif %}" class="decision-input"><input type="hidden" name="confirm_return" value="" class="confirm-return-input">
+                  <div class="mb-3 form-row"><label class="form-label" for="comment-{{ item.id }}">审核意见（打回修改时<strong>必须填写打回意见</strong>）</label><textarea class="form-control" name="comment" id="comment-{{ item.id }}" rows="2" placeholder="请填写审核意见；打回时必填原因..."></textarea></div>
+                  <div class="d-flex flex-wrap gap-2">
+                    {% if item.can_first_review %}<button type="submit" class="btn btn-success" onclick="setReviewDecision(this.form, 'approved')">初审通过（流转至待终审）</button><button type="submit" class="btn btn-danger" onclick="setReviewDecision(this.form, 'returned')">打回修改（必填打回意见）</button>{% elif item.can_final_review %}<button type="submit" class="btn btn-success" onclick="setReviewDecision(this.form, 'approved')">终审通过（正式归档）</button><button type="submit" class="btn btn-danger" onclick="setReviewDecision(this.form, 'returned')">打回修改（必填打回意见）</button>{% elif item.can_return_approved %}<button type="submit" class="btn btn-danger" onclick="setReviewDecision(this.form, 'returned')">打回修改（必填打回意见）</button>{% endif %}
+                  </div>
+                </form>
+              </div>
+              {% else %}<p class="small text-secondary mt-2 mb-0">当前状态为【{{ item.status_display }}】，无需您执行审核操作。</p>{% endif %}
+            </div></td>
           </tr>
-          {% empty %}
-          <tr>
-            <td colspan="9" class="text-center text-secondary py-5">
-              当前筛选条件下暂无申报记录。
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
+          {% empty %}<tr><td colspan="9" class="text-center text-secondary py-5">当前筛选条件下暂无申报记录。</td></tr>{% endfor %}
+        {% endspaceless %}</tbody>
       </table>
+    </div>
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" id="review-submissions-pagination">
+      <div class="small text-secondary tabular-nums">
+        {% if submission_page_obj and submission_page_obj.paginator.count %}
+        第 {{ submission_page_obj.number }} / {{ submission_page_obj.paginator.num_pages }} 页 · 当前显示第 {{ submission_page_obj.start_index }}–{{ submission_page_obj.end_index }} 条，共 {{ submission_page_obj.paginator.count }} 条
+        {% else %}
+        共 0 条记录
+        {% endif %}
+      </div>
+      {% if submission_page_obj and submission_page_obj.paginator.num_pages > 1 %}
+      <nav aria-label="申报审核列表分页">
+        <ul class="pagination pagination-sm mb-0">
+          <li class="page-item {% if not submission_page_obj.has_previous %}disabled{% endif %}">
+            {% if submission_page_obj.has_previous %}
+            <a class="page-link" href="?{% if submission_query_without_page %}{{ submission_query_without_page }}&{% endif %}sub_page={{ submission_page_obj.previous_page_number }}#review-queue-section">上一页</a>
+            {% else %}
+            <span class="page-link">上一页</span>
+            {% endif %}
+          </li>
+          {% for num in submission_page_range %}
+            {% if num == submission_page_obj.paginator.ELLIPSIS %}
+            <li class="page-item disabled"><span class="page-link">…</span></li>
+            {% elif num == submission_page_obj.number %}
+            <li class="page-item active" aria-current="page"><span class="page-link">{{ num }}</span></li>
+            {% else %}
+            <li class="page-item">
+              <a class="page-link" href="?{% if submission_query_without_page %}{{ submission_query_without_page }}&{% endif %}sub_page={{ num }}#review-queue-section">{{ num }}</a>
+            </li>
+            {% endif %}
+          {% endfor %}
+          <li class="page-item {% if not submission_page_obj.has_next %}disabled{% endif %}">
+            {% if submission_page_obj.has_next %}
+            <a class="page-link" href="?{% if submission_query_without_page %}{{ submission_query_without_page }}&{% endif %}sub_page={{ submission_page_obj.next_page_number }}#review-queue-section">下一页</a>
+            {% else %}
+            <span class="page-link">下一页</span>
+            {% endif %}
+          </li>
+        </ul>
+      </nav>
+      {% endif %}
     </div>
     {% endif %}
   </div>
@@ -1235,60 +1164,62 @@
             <th style="width: 80px;">操作</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody>{% spaceless %}
           {% for acct in account_progress_rows %}
           <tr data-account-row="{{ acct.student_number }}">
             <td class="tabular-nums text-secondary">{{ acct.student_number }}</td>
             <td><strong>{{ acct.real_name }}</strong></td>
             <td class="small">{{ acct.class_display }}</td>
             <td class="tabular-nums small text-secondary">{{ acct.phone|default:"—" }}</td>
-            <td>
-              <div class="d-flex align-items-center flex-wrap gap-1">
-                <span class="badge {% if acct.participation_type == 'team' %}badge-pending_first_review{% elif acct.participation_type == 'individual' %}badge-optional{% else %}badge-draft{% endif %}">
-                  {{ acct.participation_label }}
-                </span>
-                {% if acct.team_leader_label %}
-                <span class="small text-secondary">队长：{{ acct.team_leader_label }}</span>
-                {% endif %}
-              </div>
-              {% if acct.project_name %}
-              <div class="small text-secondary mt-1">{{ acct.project_name }}</div>
-              {% endif %}
-            </td>
-            <td>
-              {% if acct.declaration_submitted %}
-              <span class="badge badge-final_approved">已提交</span>
-              {% else %}
-              <span class="badge badge-returned">未提交</span>
-              {% endif %}
-            </td>
-            <td>
-              {% if acct.outcomes_submitted %}
-              <span class="badge badge-final_approved">已提交</span>
-              {% else %}
-              <span class="badge badge-returned">未提交</span>
-              {% endif %}
-            </td>
-            <td>
-              <span class="badge badge-{% if acct.status_code == 'none' %}draft{% else %}{{ acct.status_code }}{% endif %}">{{ acct.status_label }}</span>
-            </td>
-            <td>
-              {% if acct.can_view_submission and acct.submission_id %}
-              <a class="btn btn-sm btn-outline-secondary" href="{% url 'review-submission-detail' acct.submission_id %}">详情 ↗</a>
-              {% else %}
-              <span class="text-secondary small">—</span>
-              {% endif %}
-            </td>
+            <td><div class="d-flex align-items-center flex-wrap gap-1"><span class="badge {% if acct.participation_type == 'team' %}badge-pending_first_review{% elif acct.participation_type == 'individual' %}badge-optional{% else %}badge-draft{% endif %}">{{ acct.participation_label }}</span>{% if acct.team_leader_label %}<span class="small text-secondary">队长：{{ acct.team_leader_label }}</span>{% endif %}</div>{% if acct.project_name %}<div class="small text-secondary mt-1">{{ acct.project_name }}</div>{% endif %}</td>
+            <td>{% if acct.declaration_submitted %}<span class="badge badge-final_approved">已提交</span>{% else %}<span class="badge badge-returned">未提交</span>{% endif %}</td>
+            <td>{% if acct.outcomes_submitted %}<span class="badge badge-final_approved">已提交</span>{% else %}<span class="badge badge-returned">未提交</span>{% endif %}</td>
+            <td><span class="badge badge-{% if acct.status_code == 'none' %}draft{% else %}{{ acct.status_code }}{% endif %}">{{ acct.status_label }}</span></td>
+            <td>{% if acct.can_view_submission and acct.submission_id %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'review-submission-detail' acct.submission_id %}">详情 ↗</a>{% else %}<span class="text-secondary small">—</span>{% endif %}</td>
           </tr>
-          {% empty %}
-          <tr>
-            <td colspan="9" class="text-center text-secondary py-5">
-              当前筛选条件下暂无匹配的注册账号。
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
+          {% empty %}<tr><td colspan="9" class="text-center text-secondary py-5">当前筛选条件下暂无匹配的注册账号。</td></tr>{% endfor %}
+        {% endspaceless %}</tbody>
       </table>
+    </div>
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" id="account-progress-pagination">
+      <div class="small text-secondary tabular-nums">
+        {% if account_progress_page_obj and account_progress_page_obj.paginator.count %}
+        第 {{ account_progress_page_obj.number }} / {{ account_progress_page_obj.paginator.num_pages }} 页 · 当前显示第 {{ account_progress_page_obj.start_index }}–{{ account_progress_page_obj.end_index }} 条，共 {{ account_progress_page_obj.paginator.count }} 人
+        {% else %}
+        共 0 条记录
+        {% endif %}
+      </div>
+      {% if account_progress_page_obj and account_progress_page_obj.paginator.num_pages > 1 %}
+      <nav aria-label="学生提交进度分页">
+        <ul class="pagination pagination-sm mb-0">
+          <li class="page-item {% if not account_progress_page_obj.has_previous %}disabled{% endif %}">
+            {% if account_progress_page_obj.has_previous %}
+            <a class="page-link" href="?{% if account_progress_query_without_page %}{{ account_progress_query_without_page }}&{% endif %}acct_page={{ account_progress_page_obj.previous_page_number }}#account-progress-section">上一页</a>
+            {% else %}
+            <span class="page-link">上一页</span>
+            {% endif %}
+          </li>
+          {% for num in account_progress_page_range %}
+            {% if num == account_progress_page_obj.paginator.ELLIPSIS %}
+            <li class="page-item disabled"><span class="page-link">…</span></li>
+            {% elif num == account_progress_page_obj.number %}
+            <li class="page-item active" aria-current="page"><span class="page-link">{{ num }}</span></li>
+            {% else %}
+            <li class="page-item">
+              <a class="page-link" href="?{% if account_progress_query_without_page %}{{ account_progress_query_without_page }}&{% endif %}acct_page={{ num }}#account-progress-section">{{ num }}</a>
+            </li>
+            {% endif %}
+          {% endfor %}
+          <li class="page-item {% if not account_progress_page_obj.has_next %}disabled{% endif %}">
+            {% if account_progress_page_obj.has_next %}
+            <a class="page-link" href="?{% if account_progress_query_without_page %}{{ account_progress_query_without_page }}&{% endif %}acct_page={{ account_progress_page_obj.next_page_number }}#account-progress-section">下一页</a>
+            {% else %}
+            <span class="page-link">下一页</span>
+            {% endif %}
+          </li>
+        </ul>
+      </nav>
+      {% endif %}
     </div>
   </div>
   {% endif %}
@@ -1314,563 +1245,5 @@
   </div>
 {% endif %}
 
-<!-- ================================================================== -->
-<!-- 轻量内联交互脚本（零外部 CDN 依赖，支持校园网/内网离线环境）          -->
-<!-- ================================================================== -->
-<script>
-(function() {
-  // 审核/管理员端四段进度条比例与分布柱状图暖黄峰值高亮
-  function initAdminBentoVisuals() {
-    var segBar = document.getElementById("dash-segmented-bar");
-    if (segBar) {
-      var counts = {
-        first: parseInt(segBar.getAttribute("data-c-first") || "0", 10) || 0,
-        final: parseInt(segBar.getAttribute("data-c-final") || "0", 10) || 0,
-        approved: parseInt(segBar.getAttribute("data-c-approved") || "0", 10) || 0,
-        returned: parseInt(segBar.getAttribute("data-c-returned") || "0", 10) || 0
-      };
-      var sum = counts.first + counts.final + counts.approved + counts.returned;
-      ["first", "final", "approved", "returned"].forEach(function(k) {
-        var col = segBar.querySelector('[data-seg-col="' + k + '"]');
-        var txt = segBar.querySelector('[data-seg-text="' + k + '"]');
-        var pct = sum > 0 ? Math.round((counts[k] / sum) * 100) : 0;
-        if (col) {
-          col.style.flexGrow = String(sum > 0 ? Math.max(14, pct) : 25);
-        }
-        if (txt) {
-          txt.textContent = sum > 0 ? (pct + "% (" + counts[k] + ")") : "0%";
-        }
-      });
-    }
-
-    var chart = document.getElementById("dash-distribution-chart");
-    if (chart) {
-      var cols = Array.prototype.slice.call(chart.querySelectorAll(".bento-bar-col"));
-      var maxVal = 0;
-      cols.forEach(function(c) {
-        var v = parseInt(c.getAttribute("data-bar-count") || "0", 10) || 0;
-        if (v > maxVal) { maxVal = v; }
-      });
-      var peakMarked = false;
-      cols.forEach(function(c) {
-        var v = parseInt(c.getAttribute("data-bar-count") || "0", 10) || 0;
-        var fill = c.querySelector(".bento-bar-fill");
-        var pct = maxVal > 0 ? Math.max(16, Math.round((v / maxVal) * 100)) : 18;
-        if (fill) { fill.style.height = pct + "%"; }
-        if (maxVal > 0 && v === maxVal && !peakMarked) {
-          c.classList.add("is-peak");
-          peakMarked = true;
-        }
-      });
-    }
-  }
-
-  // 审核员/老师抽屉展开与打回修改意见 + 已通过成果二次确认前端校验
-  window.toggleReviewDrawer = function(submissionId) {
-    var row = document.getElementById("drawer-row-" + submissionId);
-    if (!row) return;
-    row.style.display = (row.style.display === "none" || !row.style.display) ? "table-row" : "none";
-  };
-
-  window.setReviewDecision = function(formEl, decisionVal) {
-    if (!formEl) return;
-    var decInput = formEl.querySelector(".decision-input");
-    if (decInput) decInput.value = decisionVal;
-    var confirmInput = formEl.querySelector(".confirm-return-input");
-    if (confirmInput && decisionVal !== "returned") {
-      confirmInput.value = "";
-    }
-  };
-
-  var pendingDashReturnForm = null;
-
-  window.validateReviewActionForm = function(formEl) {
-    if (!formEl) return true;
-    var decInput = formEl.querySelector(".decision-input");
-    var commentEl = formEl.querySelector('textarea[name="comment"]');
-    var confirmInput = formEl.querySelector(".confirm-return-input");
-    var decision = decInput ? decInput.value : "approved";
-    var comment = commentEl ? commentEl.value.trim() : "";
-
-    if (decision === "returned" && !comment) {
-      window.alert("打回修改时必须填写打回意见，原因不能为空！");
-      if (commentEl) commentEl.focus();
-      return false;
-    }
-
-    var needsConfirm = formEl.getAttribute("data-requires-confirm") === "true";
-    if (decision === "returned" && needsConfirm && (!confirmInput || confirmInput.value !== "1")) {
-      var statusLabel = formEl.getAttribute("data-status-label") || "已通过";
-      var projName = formEl.getAttribute("data-project-name") || "该申报";
-      var tip = "「" + projName + "」当前为【" + statusLabel + "】，打回后学生将恢复修改权限并需重新审核，确定打回吗？";
-      var modalEl = document.getElementById("dashReturnConfirmModal");
-      if (modalEl && window.bootstrap && window.bootstrap.Modal) {
-        var descEl = document.getElementById("dashReturnConfirmDesc");
-        var cmtEl = document.getElementById("dashReturnConfirmComment");
-        if (descEl) { descEl.textContent = tip; }
-        if (cmtEl) { cmtEl.textContent = "打回意见：" + comment; }
-        pendingDashReturnForm = formEl;
-        window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
-        return false;
-      }
-      if (!window.confirm(tip)) {
-        return false;
-      }
-      if (confirmInput) { confirmInput.value = "1"; }
-    }
-    return true;
-  };
-
-  function initDashReturnConfirmModal() {
-    var confirmBtn = document.getElementById("btnConfirmDashReturn");
-    if (!confirmBtn) return;
-    confirmBtn.addEventListener("click", function() {
-      var modalEl = document.getElementById("dashReturnConfirmModal");
-      if (modalEl && window.bootstrap && window.bootstrap.Modal) {
-        window.bootstrap.Modal.getOrCreateInstance(modalEl).hide();
-      }
-      if (pendingDashReturnForm) {
-        var confirmInput = pendingDashReturnForm.querySelector(".confirm-return-input");
-        if (confirmInput) { confirmInput.value = "1"; }
-        var targetForm = pendingDashReturnForm;
-        pendingDashReturnForm = null;
-        targetForm.submit();
-      }
-    });
-  }
-
-  function initCategoryConfigPreview() {
-    var input = document.getElementById("admin_act_categories");
-    var preview = document.getElementById("admin-categories-preview");
-    var resetBtn = document.getElementById("btn-reset-default-categories");
-    var modeBadge = document.getElementById("admin-categories-mode-badge");
-    if (!input || !preview) return;
-
-    var defaultRaw = resetBtn ? (resetBtn.getAttribute("data-default-categories") || "") : "";
-    function parseList(raw) {
-      var parts = String(raw || "").split(/[\r\n,，;；、]+/);
-      var out = [];
-      var seen = {};
-      parts.forEach(function(part) {
-        var text = part.trim();
-        if (text && !seen[text]) {
-          seen[text] = true;
-          out.push(text);
-        }
-      });
-      return out;
-    }
-
-    var defaultList = parseList(defaultRaw);
-    function renderPreview() {
-      var parsed = parseList(input.value);
-      var effective = parsed.length ? parsed : defaultList;
-      var isCustom = parsed.length > 0 && parsed.join("\n") !== defaultList.join("\n");
-      while (preview.firstChild) {
-        preview.removeChild(preview.firstChild);
-      }
-      var label = document.createElement("span");
-      label.className = "small text-secondary me-1";
-      label.id = "admin-categories-count";
-      label.textContent = (parsed.length ? "当前共 " : "留空将使用默认 ") + effective.length + " 项：";
-      preview.appendChild(label);
-      effective.forEach(function(cat) {
-        var badge = document.createElement("span");
-        badge.className = "badge badge-draft";
-        badge.textContent = cat;
-        preview.appendChild(badge);
-      });
-      if (modeBadge) {
-        modeBadge.textContent = isCustom ? "已自定义" : "默认类别";
-        modeBadge.className = "badge ms-1 " + (isCustom ? "badge-pending_final_review" : "badge-draft");
-      }
-    }
-
-    input.addEventListener("input", renderPreview);
-    if (resetBtn) {
-      resetBtn.addEventListener("click", function() {
-        input.value = defaultRaw;
-        renderPreview();
-        input.focus();
-      });
-    }
-  }
-
-  function initReviewQueueLiveFilter() {
-    var form = document.getElementById("review-filter-form");
-    var table = document.getElementById("review-submissions-table");
-    if (!form || !table) return;
-    var filterAbort = null;
-
-    function buildFilterUrl() {
-      var base = form.getAttribute("action") || window.location.pathname;
-      var params = new URLSearchParams();
-      Array.prototype.forEach.call(form.querySelectorAll("select[name], input[name]"), function(el) {
-        var name = el.getAttribute("name");
-        var val = el.value != null ? String(el.value).trim() : "";
-        if (name && val !== "") {
-          params.set(name, val);
-        }
-      });
-      var qs = params.toString();
-      return qs ? (base + "?" + qs) : base;
-    }
-
-    function refreshTable(targetUrl, activityChanged) {
-      var tbody = table.querySelector("tbody");
-      if (!tbody) {
-        window.location.href = targetUrl;
-        return;
-      }
-      if (filterAbort && typeof filterAbort.abort === "function") {
-        filterAbort.abort();
-      }
-      filterAbort = typeof window.AbortController === "function" ? new window.AbortController() : null;
-      tbody.style.transition = "opacity 0.15s ease";
-      tbody.style.opacity = "0.55";
-
-      fetch(targetUrl, {
-        method: "GET",
-        credentials: "same-origin",
-        headers: { "X-Requested-With": "XMLHttpRequest" },
-        signal: filterAbort ? filterAbort.signal : undefined
-      }).then(function(resp) {
-        if (!resp.ok || (resp.redirected && resp.url && resp.url.indexOf("/accounts/login/") !== -1)) {
-          throw new Error("HTTP " + resp.status);
-        }
-        return resp.text();
-      }).then(function(html) {
-        var doc = new window.DOMParser().parseFromString(html, "text/html");
-        var nextTbody = doc.querySelector("#review-submissions-table tbody");
-        if (!nextTbody) {
-          throw new Error("missing tbody");
-        }
-        tbody.innerHTML = nextTbody.innerHTML;
-        var curTiles = document.getElementById("review-status-tiles");
-        var nextTiles = doc.getElementById("review-status-tiles");
-        if (curTiles && nextTiles) {
-          curTiles.innerHTML = nextTiles.innerHTML;
-        }
-        if (activityChanged) {
-          var curCat = document.getElementById("filter_category");
-          var nextCat = doc.getElementById("filter_category");
-          if (curCat && nextCat) {
-            curCat.innerHTML = nextCat.innerHTML;
-          }
-          var curReset = document.getElementById("btn-review-filter-reset");
-          var nextReset = doc.getElementById("btn-review-filter-reset");
-          if (curReset && nextReset) {
-            curReset.setAttribute("href", nextReset.getAttribute("href") || "");
-          }
-          var curDashExportBtn = document.getElementById("btn-dash-start-export");
-          var nextDashExportBtn = doc.getElementById("btn-dash-start-export");
-          if (curDashExportBtn && nextDashExportBtn) {
-            curDashExportBtn.setAttribute("data-activity-id", nextDashExportBtn.getAttribute("data-activity-id") || "");
-          }
-          var curAcctSection = document.getElementById("account-progress-section");
-          var nextAcctSection = doc.getElementById("account-progress-section");
-          if (curAcctSection && nextAcctSection) {
-            var curAcctBody = curAcctSection.querySelector("#account-progress-table tbody");
-            var nextAcctBody = nextAcctSection.querySelector("#account-progress-table tbody");
-            if (curAcctBody && nextAcctBody) { curAcctBody.innerHTML = nextAcctBody.innerHTML; }
-            var curAcctBadges = document.getElementById("account-progress-count-badges");
-            var nextAcctBadges = doc.getElementById("account-progress-count-badges");
-            if (curAcctBadges && nextAcctBadges) { curAcctBadges.innerHTML = nextAcctBadges.innerHTML; }
-            var curAcctPills = document.getElementById("account-progress-quick-pills");
-            var nextAcctPills = doc.getElementById("account-progress-quick-pills");
-            if (curAcctPills && nextAcctPills) { curAcctPills.innerHTML = nextAcctPills.innerHTML; }
-            var curHiddenAct = document.getElementById("acct_hidden_activity_id");
-            var nextHiddenAct = doc.getElementById("acct_hidden_activity_id");
-            if (curHiddenAct && nextHiddenAct) { curHiddenAct.value = nextHiddenAct.value; }
-          }
-        }
-        if (window.history && typeof window.history.replaceState === "function") {
-          window.history.replaceState(null, "", targetUrl);
-        }
-        tbody.style.opacity = "";
-      })["catch"](function(err) {
-        if (err && err.name === "AbortError") return;
-        tbody.style.opacity = "";
-        window.location.href = targetUrl;
-      });
-    }
-
-    form.addEventListener("change", function(evt) {
-      var target = evt.target;
-      if (!target || target.tagName !== "SELECT") return;
-      var isActivity = target.id === "filter_activity_id";
-      if (isActivity) {
-        var catEl = document.getElementById("filter_category");
-        if (catEl) { catEl.value = ""; }
-      }
-      refreshTable(buildFilterUrl(), isActivity);
-    });
-
-    form.addEventListener("submit", function(evt) {
-      evt.preventDefault();
-      refreshTable(buildFilterUrl(), false);
-    });
-
-    var resetBtn = document.getElementById("btn-review-filter-reset");
-    if (resetBtn) {
-      resetBtn.addEventListener("click", function(evt) {
-        evt.preventDefault();
-        Array.prototype.forEach.call(form.querySelectorAll("select[name]"), function(el) {
-          if (el.id !== "filter_activity_id") {
-            el.value = "";
-          }
-        });
-        refreshTable(buildFilterUrl(), false);
-      });
-    }
-
-    var tilesBox = document.getElementById("review-status-tiles");
-    if (tilesBox) {
-      tilesBox.addEventListener("click", function(evt) {
-        var link = evt.target && evt.target.closest ? evt.target.closest("a.activity-item") : null;
-        if (!link) return;
-        evt.preventDefault();
-        var statusVal = link.getAttribute("data-tile-status") || "";
-        var statusSelect = document.getElementById("filter_status");
-        if (statusSelect) {
-          statusSelect.value = statusVal;
-        }
-        refreshTable(buildFilterUrl(), false);
-      });
-    }
-  }
-
-  function initAccountProgressLiveFilter() {
-    var form = document.getElementById("account-progress-filter-form");
-    var table = document.getElementById("account-progress-table");
-    if (!form || !table) return;
-    var abortCtrl = null;
-    var searchTimer = null;
-
-    function buildAccountFilterUrl() {
-      var base = form.getAttribute("action") || window.location.pathname;
-      var params = new URLSearchParams(window.location.search || "");
-      ["acct_submit", "acct_class", "acct_decl_type", "acct_q"].forEach(function(k) {
-        params.delete(k);
-      });
-      Array.prototype.forEach.call(form.querySelectorAll("select[name], input[name]"), function(el) {
-        var name = el.getAttribute("name");
-        var val = el.value != null ? String(el.value).trim() : "";
-        if (name && val !== "") {
-          params.set(name, val);
-        }
-      });
-      var qs = params.toString();
-      return qs ? (base + "?" + qs) : base;
-    }
-
-    function refreshAccountTable(targetUrl) {
-      var tbody = table.querySelector("tbody");
-      if (!tbody) {
-        window.location.href = targetUrl;
-        return;
-      }
-      if (abortCtrl && typeof abortCtrl.abort === "function") {
-        abortCtrl.abort();
-      }
-      abortCtrl = typeof window.AbortController === "function" ? new window.AbortController() : null;
-      tbody.style.transition = "opacity 0.15s ease";
-      tbody.style.opacity = "0.55";
-
-      fetch(targetUrl, {
-        method: "GET",
-        credentials: "same-origin",
-        headers: { "X-Requested-With": "XMLHttpRequest" },
-        signal: abortCtrl ? abortCtrl.signal : undefined
-      }).then(function(resp) {
-        if (!resp.ok || (resp.redirected && resp.url && resp.url.indexOf("/accounts/login/") !== -1)) {
-          throw new Error("HTTP " + resp.status);
-        }
-        return resp.text();
-      }).then(function(html) {
-        var doc = new window.DOMParser().parseFromString(html, "text/html");
-        var nextTbody = doc.querySelector("#account-progress-table tbody");
-        if (!nextTbody) {
-          throw new Error("missing account tbody");
-        }
-        tbody.innerHTML = nextTbody.innerHTML;
-        var curBadges = document.getElementById("account-progress-count-badges");
-        var nextBadges = doc.getElementById("account-progress-count-badges");
-        if (curBadges && nextBadges) {
-          curBadges.innerHTML = nextBadges.innerHTML;
-        }
-        var curPills = document.getElementById("account-progress-quick-pills");
-        var nextPills = doc.getElementById("account-progress-quick-pills");
-        if (curPills && nextPills) {
-          curPills.innerHTML = nextPills.innerHTML;
-        }
-        if (window.history && typeof window.history.replaceState === "function") {
-          window.history.replaceState(null, "", targetUrl);
-        }
-        tbody.style.opacity = "";
-      })["catch"](function(err) {
-        if (err && err.name === "AbortError") return;
-        tbody.style.opacity = "";
-        window.location.href = targetUrl;
-      });
-    }
-
-    form.addEventListener("change", function(evt) {
-      var target = evt.target;
-      if (!target || target.tagName !== "SELECT") return;
-      refreshAccountTable(buildAccountFilterUrl());
-    });
-
-    form.addEventListener("submit", function(evt) {
-      evt.preventDefault();
-      refreshAccountTable(buildAccountFilterUrl());
-    });
-
-    var searchInput = document.getElementById("filter_acct_q");
-    if (searchInput) {
-      searchInput.addEventListener("input", function() {
-        if (searchTimer) { window.clearTimeout(searchTimer); }
-        searchTimer = window.setTimeout(function() {
-          refreshAccountTable(buildAccountFilterUrl());
-        }, 250);
-      });
-    }
-
-    var resetBtn = document.getElementById("btn-acct-filter-reset");
-    if (resetBtn) {
-      resetBtn.addEventListener("click", function(evt) {
-        evt.preventDefault();
-        Array.prototype.forEach.call(form.querySelectorAll("select[name], input[type='text']"), function(el) {
-          el.value = "";
-        });
-        refreshAccountTable(buildAccountFilterUrl());
-      });
-    }
-
-    var quickPills = document.getElementById("account-progress-quick-pills");
-    if (quickPills) {
-      quickPills.addEventListener("click", function(evt) {
-        var btn = evt.target && evt.target.closest ? evt.target.closest("[data-acct-quick]") : null;
-        if (!btn) return;
-        evt.preventDefault();
-        var val = btn.getAttribute("data-acct-quick") || "";
-        var sel = document.getElementById("filter_acct_submit");
-        if (sel) { sel.value = val; }
-        refreshAccountTable(buildAccountFilterUrl());
-      });
-    }
-  }
-
-  function initDashboardBulkExport() {
-    var btn = document.getElementById("btn-dash-start-export");
-    var modeSel = document.getElementById("dash-export-mode-select");
-    var statusBox = document.getElementById("dash-export-status-box");
-    var statusText = document.getElementById("dash-export-status-text");
-    var downloadLink = document.getElementById("dash-export-download-link");
-    if (!btn || !statusBox || !statusText || !downloadLink) return;
-
-    var csrfToken = (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] || "";
-    var pollTimer = null;
-
-    function stopPoll() {
-      if (pollTimer) {
-        window.clearInterval(pollTimer);
-        pollTimer = null;
-      }
-    }
-
-    function renderJob(job) {
-      statusBox.hidden = false;
-      var pct = Number(job.percent || 0);
-      var modeLabel = job.mode_label ? (job.mode_label + " · ") : "";
-      if (job.status === "done") {
-        stopPoll();
-        if (job.file_count) {
-          statusText.textContent = modeLabel + "已完成（" + job.file_count + " 份文件）";
-        } else {
-          statusText.textContent = modeLabel + "已完成（暂无可导出文件，0 份）";
-        }
-        if (job.download_url) {
-          downloadLink.href = job.download_url;
-          downloadLink.hidden = false;
-        }
-      } else if (job.status === "failed") {
-        stopPoll();
-        statusText.textContent = modeLabel + "导出失败：" + (job.error_code || "未知错误");
-        downloadLink.hidden = true;
-      } else {
-        statusText.textContent = modeLabel + (job.status_display || "处理中") + "（" + pct + "%）";
-        downloadLink.hidden = true;
-      }
-    }
-
-    function poll(jobId) {
-      fetch("/api/v1/exports/status/" + jobId + "/", {
-        headers: { "Accept": "application/json" },
-        credentials: "same-origin"
-      }).then(function(resp) {
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        return resp.json();
-      }).then(function(data) {
-        renderJob(data.job || {});
-      })["catch"](function() {
-        stopPoll();
-        statusText.textContent = "进度查询失败，请稍后刷新查看导出任务。";
-      });
-    }
-
-    btn.addEventListener("click", function() {
-      var activityId = btn.getAttribute("data-activity-id") || "";
-      if (!activityId) return;
-      var mode = modeSel ? modeSel.value : "declaration_and_outcomes";
-      stopPoll();
-      btn.disabled = true;
-      if (modeSel) modeSel.disabled = true;
-      statusBox.hidden = false;
-      downloadLink.hidden = true;
-      statusText.textContent = "正在创建导出任务…";
-
-      fetch(btn.getAttribute("data-start-url"), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRFToken": csrfToken,
-          "Accept": "application/json"
-        },
-        body: JSON.stringify({ activity_id: activityId, mode: mode })
-      }).then(function(resp) {
-        return resp.json().then(function(data) { return { ok: resp.ok, data: data }; });
-      }).then(function(result) {
-        btn.disabled = false;
-        if (modeSel) modeSel.disabled = false;
-        if (!result.ok) {
-          var msg = (result.data && result.data.error && result.data.error.message) || "导出任务创建失败。";
-          statusText.textContent = msg;
-          return;
-        }
-        var job = result.data.job || {};
-        renderJob(job);
-        if (job.status !== "done" && job.status !== "failed") {
-          var jobId = result.data.job_id || job.job_id;
-          pollTimer = window.setInterval(function() { poll(jobId); }, 2000);
-        }
-      })["catch"](function() {
-        btn.disabled = false;
-        if (modeSel) modeSel.disabled = false;
-        statusText.textContent = "网络异常，导出任务未能创建，请重试。";
-      });
-    });
-  }
-
-  document.addEventListener("DOMContentLoaded", function() {
-    initAdminBentoVisuals();
-    initCategoryConfigPreview();
-    initReviewQueueLiveFilter();
-    initAccountProgressLiveFilter();
-    initDashboardBulkExport();
-    initDashReturnConfirmModal();
-  });
-})();
-</script>
+<script src="{% static 'js/dashboard.js' %}?v=20261126-1"></script>
 {% endblock %}

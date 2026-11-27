@@ -25,10 +25,12 @@ logger = logging.getLogger(__name__)
 
 MB = 1024 * 1024
 
-# 解压炸弹的三道闸：解压后总大小、条目数、条目路径与嵌套层级。
-MAX_ARCHIVE_TOTAL_BYTES = 200 * MB
-MAX_ARCHIVE_ENTRIES = 200
-MAX_ARCHIVE_DEPTH = 1  # 只允许"一层"：包内再出现 .zip 即等于 2 层，直接拒绝
+# 解压炸弹的多道闸：解压后总大小、条目数、极端压缩比、普通目录深度与嵌套压缩包层级。
+MAX_ARCHIVE_TOTAL_BYTES = 2500 * MB
+MAX_ARCHIVE_ENTRIES = 500
+MAX_ARCHIVE_DEPTH = 1  # 仅约束压缩包嵌套层级：包内再出现 .zip 即等于 2 层，直接拒绝
+MAX_ARCHIVE_COMPRESSION_RATIO = 100
+ARCHIVE_BOMB_RATIO_MIN_BYTES = 100 * MB
 MAX_ENTRY_NAME_LENGTH = 255
 MAX_ENTRY_DIRECTORY_DEPTH = 6
 STREAM_CHUNK_BYTES = 64 * 1024
@@ -132,6 +134,8 @@ def inspect_zip_archive(
     total_cap = int(max_total_bytes or _limit("ARCHIVE_MAX_TOTAL_BYTES", MAX_ARCHIVE_TOTAL_BYTES))
     entry_cap = int(max_entries or _limit("ARCHIVE_MAX_ENTRIES", MAX_ARCHIVE_ENTRIES))
     depth_cap = int(max_depth or _limit("ARCHIVE_MAX_DEPTH", MAX_ARCHIVE_DEPTH))
+    ratio_cap = _limit("ARCHIVE_MAX_COMPRESSION_RATIO", MAX_ARCHIVE_COMPRESSION_RATIO)
+    ratio_min_bytes = _limit("ARCHIVE_BOMB_RATIO_MIN_BYTES", ARCHIVE_BOMB_RATIO_MIN_BYTES)
     root = Path(destination_root or settings.MEDIA_ROOT)
 
     try:
@@ -156,13 +160,13 @@ def inspect_zip_archive(
             file_type = (info.external_attr >> 16) & FILE_TYPE_MASK
             if file_type == SYMLINK_MODE:
                 raise DomainError("压缩包包含符号链接条目，已拒绝。")
+            # 普通文件夹目录深度由 _normalize_member_name 按 MAX_ENTRY_DIRECTORY_DEPTH=6 校验；
+            # depth_cap 仅用于禁止压缩包内再嵌套 .zip。
             name, depth = _normalize_member_name(info.filename)
             if Path(name).suffix.lower() in NESTED_ARCHIVE_SUFFIXES:
                 raise DomainError(
                     f"压缩包内含压缩包（{name}），嵌套层级超过 {depth_cap}，已拒绝。"
                 )
-            if depth > depth_cap:
-                raise DomainError(f"压缩包条目嵌套层级超过 {depth_cap}，已拒绝。")
             _resolve_within(Path(name), root)
             size = int(info.file_size)
             if size < 0:
@@ -182,6 +186,12 @@ def inspect_zip_archive(
                     depth=depth,
                 )
             )
+
+    ratio = (total / compressed_total) if compressed_total > 0 else float(total)
+    if ratio_cap > 0 and total > ratio_min_bytes and ratio > ratio_cap:
+        raise DomainError(
+            f"压缩包压缩比异常（约 {ratio:.1f} 倍，解压后 {total // MB}MB），已拒绝（解压炸弹）。"
+        )
 
     inspection = ZipInspection(
         entries=tuple(entries),

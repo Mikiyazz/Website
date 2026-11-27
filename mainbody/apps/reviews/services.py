@@ -2,12 +2,11 @@
 import uuid
 from django.db import transaction
 from apps.accounts.models import User
-from apps.accounts.permissions import is_college_admin
+from apps.accounts.permissions import is_college_admin, is_target_in_reviewer_scope
 from apps.audit.services import record
 from apps.common.errors import Conflict, DomainError, Forbidden
 from apps.submissions.models import Submission
 from .models import ReviewRecord
-from .selectors import reviewable_submissions
 
 
 APPROVED_RETURN_STATUSES = frozenset({
@@ -17,15 +16,16 @@ APPROVED_RETURN_STATUSES = frozenset({
 
 
 def has_first_review_permission(actor, activity_id, submission: Submission) -> bool:
-    """判断操作者是否对该申报拥有初审或终审权限。"""
+    """判断操作者是否对该申报拥有初审或终审权限（直接基于审核员管辖范围判定，避免行锁事务内全表扫描）。"""
     if not getattr(actor, "is_authenticated", False) or not getattr(actor, "is_active", False):
+        return False
+    if submission is None:
+        return False
+    if activity_id is not None and str(submission.activity_id) != str(activity_id):
         return False
     if is_college_admin(actor):
         return True
-    return (
-        getattr(actor, "role", None) == User.Role.REVIEWER
-        and reviewable_submissions(actor, activity_id).filter(pk=submission.pk).exists()
-    )
+    return is_target_in_reviewer_scope(actor, submission.owner, activity_id=activity_id)
 
 
 @transaction.atomic
@@ -49,7 +49,11 @@ def review_submission(
     comment = str(comment or "").strip()
 
     try:
-        submission = Submission.objects.select_for_update().get(pk=submission_id, activity_id=activity_id)
+        submission = (
+            Submission.objects.select_for_update(of=("self",))
+            .select_related("owner")
+            .get(pk=submission_id, activity_id=activity_id)
+        )
     except Submission.DoesNotExist:
         raise DomainError("未找到对应的提交记录。")
 

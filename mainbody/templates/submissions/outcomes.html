@@ -434,8 +434,8 @@
   </div>
 </div>
 
-<script type="application/json" id="wizard-materials-json">{{ materials_json|safe }}</script>
-<script type="application/json" id="wizard-team-json">{{ team_members_json|safe }}</script>
+{{ materials|json_script:"wizard-materials-json" }}
+{{ team_members|json_script:"wizard-team-json" }}
 {% endblock %}
 
 {% block extra_js %}
@@ -448,7 +448,7 @@
 <script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-poster.min.js' %}"></script>
 <script src="{% static 'vendor/filepond/plugins/filepond-plugin-file-metadata.min.js' %}"></script>
 <script src="{% static 'vendor/filepond/locale/zh-cn.global.js' %}"></script>
-<script src="{% static 'js/apply-wizard.js' %}?v=20261126-6"></script>
+<script src="{% static 'js/apply-wizard.js' %}?v=20261126-7"></script>
 <script>
 (function () {
   "use strict";

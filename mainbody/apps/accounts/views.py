@@ -5,6 +5,8 @@ import uuid
 from django.contrib import messages
 from django.contrib.auth import login as auth_login, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
+from django.core.paginator import Paginator
+from django.db.models import Prefetch, Q
 from django.http import HttpResponseBadRequest, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -12,15 +14,20 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from apps.accounts.models import User
 from apps.accounts.permissions import (
+    build_class_scope_q,
+    format_class_scope_label,
     format_user_class_label,
     is_college_admin,
     is_reviewer,
     is_target_in_reviewer_scope,
+    parse_class_filter,
     require_college_admin,
     require_reviewer_or_admin,
     require_student,
+    reviewer_allowed_class_labels,
     reviewer_allowed_class_names,
     reviewer_user_scope_q,
+    scope_matches_class_filter,
 )
 from apps.accounts.models import StudentRoster
 from apps.activities.models import Activity, DEFAULT_PROJECT_CATEGORIES, parse_project_categories
@@ -34,22 +41,29 @@ from apps.audit.services import record
 from apps.common.api import endpoint, json_body
 from apps.common.errors import DomainError, Forbidden
 from apps.exports.services import list_activity_declared_classes, resolve_status_filter
+from apps.reviews.models import ReviewRecord
 from apps.reviews.selectors import (
+    WORKBENCH_MAX_PAGE_SIZE,
+    WORKBENCH_PAGE_SIZE,
+    collect_workbench_page,
     collect_workbench_rows,
     declaration_type_filter_q,
     normalize_declaration_type_filter,
+    parse_page_size,
     reviewable_submissions,
+    summarize_submission_counts,
     workbench_activities,
     workbench_class_options,
     workbench_whitelist_numbers,
 )
 from apps.reviews.services import review_submission
 from apps.reviews.views import serialize_submission_for_review
-from apps.submissions.models import Submission
+from apps.submissions.models import Submission, SubmissionTeamMember
 from apps.submissions.services import (
     _team_submission_priority,
     can_delete_submission,
     create_draft,
+    find_all_team_membership_submissions,
     find_team_membership_activity_ids,
     find_team_membership_submissions,
     first_approved_submission_ids,
@@ -59,9 +73,38 @@ from apps.submissions.services import (
     submit_for_review,
 )
 from apps.submissions.views import _summarize_submission_card
+from apps.uploads.models import FileAsset, UploadSession
 from apps.uploads.policies import INLINE_PREVIEW_EXTENSIONS, STANDARD_MATERIAL_RULES
 from apps.uploads.services import ensure_standard_material_requirements, map_uploads_by_submission
 from .services import change_password, register_student
+
+DASHBOARD_SUBMISSION_PAGE_SIZE = 25
+ACCOUNT_PROGRESS_PAGE_SIZE = 25
+
+
+def _parse_uuid_or_domain_error(raw_value, field_label: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(raw_value).strip())
+    except (ValueError, TypeError, AttributeError):
+        raise DomainError(f"{field_label} 必须为有效 UUID。") from None
+
+
+def _query_without_param(request, param_name: str) -> str:
+    params = request.GET.copy()
+    params.pop(param_name, None)
+    return params.urlencode()
+
+
+def _elided_page_range(page_obj) -> list:
+    if page_obj is None or page_obj.paginator.num_pages <= 1:
+        return []
+    return list(
+        page_obj.paginator.get_elided_page_range(
+            page_obj.number,
+            on_each_side=1,
+            on_ends=1,
+        )
+    )
 
 
 def serialize_user(user):
@@ -274,24 +317,32 @@ def _format_bytes(num_bytes: int) -> str:
 
 def _build_student_workbench_context(request):
     user = request.user
-    eligible_qs = eligible_activities(user)
-    submitted_act_ids = set(
-        Submission.objects.filter(owner=user).values_list("activity_id", flat=True)
-    ) | find_team_membership_activity_ids(user.username)
+    all_own_subs = list(
+        Submission.objects.select_related("owner")
+        .filter(owner=user)
+        .order_by("-updated_at", "-created_at")
+    )
+    own_submissions_by_act: dict[uuid.UUID, list[Submission]] = {}
+    for sub in all_own_subs:
+        own_submissions_by_act.setdefault(sub.activity_id, []).append(sub)
+
+    all_team_subs_by_act = find_all_team_membership_submissions(user.username)
+    submitted_act_ids = set(own_submissions_by_act.keys()) | set(all_team_subs_by_act.keys())
+
     all_acts = list(Activity.objects.all().order_by("-created_at")[:100])
-    eligible_id_set = set(eligible_qs.values_list("id", flat=True)) | submitted_act_ids
+    user_is_admin = is_college_admin(user)
+    user_class = str(getattr(user, "class_name", "") or "").strip()
+    eligible_id_set = set(submitted_act_ids)
     for act in all_acts:
-        if act.is_in_late_whitelist(user.username):
+        if (
+            not act.allowed_classes
+            or (user_class and user_class in act.allowed_classes)
+            or (user_is_admin and not user_class)
+            or act.is_in_late_whitelist(user.username)
+        ):
             eligible_id_set.add(act.id)
 
     activities = [act for act in all_acts if act.id in eligible_id_set]
-    own_submissions_by_act: dict[uuid.UUID, list[Submission]] = {}
-    for sub in (
-        Submission.objects.select_related("owner")
-        .filter(owner=user, activity__in=activities)
-        .order_by("-updated_at", "-created_at")
-    ):
-        own_submissions_by_act.setdefault(sub.activity_id, []).append(sub)
 
     team_submissions_by_act: dict[uuid.UUID, list[Submission]] = {}
     submissions_by_act = {}
@@ -300,7 +351,7 @@ def _build_student_workbench_context(request):
         own_subs = own_submissions_by_act.get(act.id, [])
         team_subs = [
             sub
-            for sub in find_team_membership_submissions(activity=act, student_number=user.username)
+            for sub in all_team_subs_by_act.get(act.id, [])
             if sub.owner_id != user.id
         ]
         team_submissions_by_act[act.id] = team_subs
@@ -389,6 +440,7 @@ def _build_student_workbench_context(request):
     uploads_by_req = {}
     active_uploads = []
 
+    first_approved_ids: set[uuid.UUID] = set()
     if selected_activity is not None:
         reqs_map = ensure_standard_material_requirements(selected_activity)
         can_write_now, window_label = is_activity_open_for_user(selected_activity, user)
@@ -409,7 +461,7 @@ def _build_student_workbench_context(request):
                         team_leader = item.owner
                         break
 
-        skip_autocreate = (request.GET.get("deleted") or "").strip() == "1"
+        # 禁止学生首页 GET / 自动 create_draft()：仅展示已有申报；新草稿在进入填报页或首次保存/上传时按需创建。
         if submission is None:
             non_empty_own = [item for item in own_subs if not is_empty_draft_submission(item)]
             if non_empty_own:
@@ -420,13 +472,6 @@ def _build_student_workbench_context(request):
                 team_leader = submission.owner
             elif own_subs:
                 submission = own_subs[0]
-            elif can_write_now and not skip_autocreate:
-                try:
-                    submission = create_draft(actor=user, activity_id=selected_activity.id)
-                    own_subs.insert(0, submission)
-                    own_submissions_by_act[selected_activity.id] = own_subs
-                except (DomainError, Forbidden):
-                    pass
 
         uploads_map = map_uploads_by_submission(own_subs + team_subs, activity=selected_activity)
         first_approved_ids = first_approved_submission_ids([item.id for item in own_subs])
@@ -476,11 +521,9 @@ def _build_student_workbench_context(request):
             )
             if submission.status == Submission.Status.RETURNED:
                 is_returned = True
-                latest_returned_record = (
-                    submission.review_records.filter(decision="returned")
-                    .select_related("reviewer")
-                    .order_by("-created_at")
-                    .first()
+                latest_returned_record = next(
+                    (rec for rec in review_records if rec.decision == "returned"),
+                    None,
                 )
             from apps.submissions.services import is_submission_locked_for_student
 
@@ -496,9 +539,12 @@ def _build_student_workbench_context(request):
                 lock_reason = f"当前活动{window_label}，当前申报已只读锁定。"
             else:
                 is_locked = False
-        else:
+        elif not can_write_now:
             is_locked = True
             lock_reason = f"当前活动{window_label}，暂不可创建或修改申报。"
+        else:
+            is_locked = False
+            lock_reason = ""
 
         active_uploads = uploads_map.get(submission.id, []) if submission is not None else []
         for up in active_uploads:
@@ -611,7 +657,10 @@ def _build_student_workbench_context(request):
         submission is not None
         and not is_team_member_view
         and selected_can_write_now
-        and can_delete_submission(submission)
+        and can_delete_submission(
+            submission,
+            has_passed_first_review=(submission.id in first_approved_ids),
+        )
     )
 
     return {
@@ -644,7 +693,7 @@ def _build_student_workbench_context(request):
 
 
 def _build_admin_account_progress(request, selected_activity, *, actor=None):
-    """构建注册账号信息与提交情况板块数据：管理员看全院，团支书仅看本班。"""
+    """构建注册账号信息与提交情况板块数据：管理员分页看全院，团支书仅查询本班及其团队关联。"""
     viewer = actor or request.user
     viewer_is_admin = is_college_admin(viewer)
     selected_activity_id = selected_activity.id if selected_activity is not None else None
@@ -653,174 +702,352 @@ def _build_admin_account_progress(request, selected_activity, *, actor=None):
     acct_class_filter = (request.GET.get("acct_class") or "").strip()
     acct_decl_type_filter = (request.GET.get("acct_decl_type") or "").strip()
     acct_q_filter = (request.GET.get("acct_q") or "").strip()
+    acct_page_num = request.GET.get("acct_page") or 1
+    acct_page_size = parse_page_size(
+        request.GET.get("acct_page_size"),
+        default=ACCOUNT_PROGRESS_PAGE_SIZE,
+        maximum=WORKBENCH_MAX_PAGE_SIZE,
+    )
 
     registered_qs = User.objects.filter(role=User.Role.STUDENT, is_active=True)
     if not viewer_is_admin:
         registered_qs = registered_qs.filter(
             reviewer_user_scope_q(viewer, prefix="", activity_id=selected_activity_id)
         )
-    registered_users = list(registered_qs.order_by("grade", "major", "class_name", "username"))
-    acct_classes = sorted({u.class_name for u in registered_users if u.class_name})
 
-    own_subs_by_uid: dict[int, list[Submission]] = {}
-    team_memberships: dict[str, list[Submission]] = {}
-    app_form_uploads_by_sub_id: dict[uuid.UUID, list] = {}
-    if selected_activity is not None:
-        all_subs = list(
-            Submission.objects.select_related("owner")
-            .filter(activity=selected_activity)
-            .order_by("-updated_at")
+    user_tuples = list(
+        registered_qs.order_by("grade", "major", "class_name", "username").values_list(
+            "id", "username", "real_name", "grade", "major", "class_name"
         )
-        for sub in all_subs:
-            own_subs_by_uid.setdefault(sub.owner_id, []).append(sub)
-        team_memberships = map_activity_team_memberships_all(selected_activity.id)
-        app_form_uploads_by_sub_id = map_uploads_by_submission(
-            all_subs,
-            activity=selected_activity,
-            requirement_code="application_form",
-        )
+    )
+    acct_classes = sorted(
+        {
+            format_class_scope_label(g, m, c)
+            for _, _, _, g, m, c in user_tuples
+            if str(c or "").strip()
+        }
+    )
 
-    def _sub_decl_done(sub: Submission) -> bool:
-        submitted_at = sub.declaration_submitted_at
-        forms = app_form_uploads_by_sub_id.get(sub.id, [])
-        return bool(sub.declaration_submitted) and any(
-            submitted_at is None or up.created_at <= submitted_at for up in forms
-        )
-
-    def _sub_outcomes_done(sub: Submission) -> bool:
-        return sub.status in (
+    status_rank_map = {
+        Submission.Status.FINAL_APPROVED: 5,
+        Submission.Status.PENDING_FINAL_REVIEW: 4,
+        Submission.Status.PENDING_FIRST_REVIEW: 3,
+        Submission.Status.RETURNED: 2,
+        Submission.Status.DRAFT: 1,
+    }
+    outcome_done_statuses = frozenset(
+        {
             Submission.Status.PENDING_FIRST_REVIEW,
             Submission.Status.PENDING_FINAL_REVIEW,
             Submission.Status.FINAL_APPROVED,
-        )
+        }
+    )
 
-    all_rows = []
-    for stu in registered_users:
-        own_subs = [s for s in own_subs_by_uid.get(stu.id, []) if not is_empty_draft_submission(s)]
-        team_subs = [s for s in team_memberships.get(stu.username, []) if s.owner_id != stu.id]
+    own_sub_ids_by_uid: dict[int, list[uuid.UUID]] = {}
+    team_sub_ids_by_sn: dict[str, list[uuid.UUID]] = {}
+    sub_meta_by_id: dict[uuid.UUID, tuple] = {}
+    decl_done_sub_ids: set[uuid.UUID] = set()
 
-        candidates: list[tuple[Submission, bool]] = [(s, False) for s in own_subs] + [(s, True) for s in team_subs]
-        candidates.sort(
-            key=lambda pair: (
-                1 if _sub_outcomes_done(pair[0]) else 0,
-                1 if _sub_decl_done(pair[0]) else 0,
-                _team_submission_priority(pair[0]),
-                0 if not pair[1] else -1,
-            ),
-            reverse=True,
-        )
+    if selected_activity is not None and user_tuples:
+        scoped_user_ids = [row[0] for row in user_tuples]
+        scoped_usernames = [row[1] for row in user_tuples]
+
+        if viewer_is_admin:
+            tm_qs = SubmissionTeamMember.objects.filter(activity_id=selected_activity.id)
+        else:
+            tm_qs = SubmissionTeamMember.objects.filter(
+                activity_id=selected_activity.id,
+                student_number__in=scoped_usernames,
+            )
+
+        team_sub_id_set: set[uuid.UUID] = set()
+        for sn, sub_id in tm_qs.values_list("student_number", "submission_id"):
+            clean_sn = str(sn or "").strip()
+            if clean_sn and sub_id:
+                team_sub_ids_by_sn.setdefault(clean_sn, []).append(sub_id)
+                team_sub_id_set.add(sub_id)
+
+        # 团支书严格限定查询本班学生本人申报与本班学生参与的团队申报，绝不拉取全院申报。
+        sub_qs = Submission.objects.filter(activity=selected_activity)
+        if not viewer_is_admin:
+            sub_scope_q = Q(owner_id__in=scoped_user_ids)
+            if team_sub_id_set:
+                sub_scope_q |= Q(id__in=team_sub_id_set)
+            sub_qs = sub_qs.filter(sub_scope_q)
+
+        owner_sub_counts: dict[int, int] = {}
+        single_sub_by_owner: dict[int, uuid.UUID] = {}
+        for sid, owner_id, status_code, decl_sub, decl_at, updated_at, draft_data in sub_qs.values_list(
+            "id",
+            "owner_id",
+            "status",
+            "declaration_submitted",
+            "declaration_submitted_at",
+            "updated_at",
+            "draft_data",
+        ):
+            owner_sub_counts[owner_id] = owner_sub_counts.get(owner_id, 0) + 1
+            single_sub_by_owner[owner_id] = sid
+            sub_meta_by_id[sid] = (owner_id, status_code, bool(decl_sub), decl_at, updated_at, draft_data)
+            is_empty = (
+                status_code == Submission.Status.DRAFT
+                and not decl_sub
+                and (not isinstance(draft_data, dict) or not draft_data)
+            )
+            if not is_empty:
+                own_sub_ids_by_uid.setdefault(owner_id, []).append(sid)
+
+        if sub_meta_by_id:
+            app_upload_qs = UploadSession.objects.filter(
+                requirement__activity=selected_activity,
+                requirement__code="application_form",
+                status=UploadSession.Status.COMPLETE,
+                fileasset__status=FileAsset.Status.VALID,
+            )
+            if not viewer_is_admin:
+                app_upload_qs = app_upload_qs.filter(
+                    Q(submission_id__in=sub_meta_by_id.keys())
+                    | Q(submission__isnull=True, owner_id__in=scoped_user_ids)
+                )
+            for up_sub_id, up_owner_id, up_created_at in app_upload_qs.values_list(
+                "submission_id", "owner_id", "created_at"
+            ):
+                target_sid = up_sub_id
+                if target_sid is None and owner_sub_counts.get(up_owner_id, 0) <= 1:
+                    target_sid = single_sub_by_owner.get(up_owner_id)
+                if target_sid is None or target_sid in decl_done_sub_ids:
+                    continue
+                meta = sub_meta_by_id.get(target_sid)
+                if meta is None:
+                    continue
+                _, _, decl_sub, decl_at, _, _ = meta
+                if decl_sub and (decl_at is None or up_created_at <= decl_at):
+                    decl_done_sub_ids.add(target_sid)
+
+    summary = {
+        "total": len(user_tuples),
+        "decl_submitted": 0,
+        "decl_unsubmitted": 0,
+        "outcomes_submitted": 0,
+        "outcomes_unsubmitted": 0,
+        "any_unsubmitted": 0,
+        "both_unsubmitted": 0,
+        "both_submitted": 0,
+    }
+
+    parsed_acct_class = parse_class_filter(acct_class_filter) if acct_class_filter else None
+    q_lower = acct_q_filter.lower()
+    matched_user_ids: list[int] = []
+
+    for uid, username, real_name, grade, major, class_name in user_tuples:
+        own_ids = own_sub_ids_by_uid.get(uid, [])
+        team_ids = [
+            sid
+            for sid in team_sub_ids_by_sn.get(username, [])
+            if sid in sub_meta_by_id and sub_meta_by_id[sid][0] != uid
+        ]
+
+        candidates: list[tuple[uuid.UUID, bool]] = [(sid, False) for sid in own_ids] + [
+            (sid, True) for sid in team_ids
+        ]
 
         if candidates:
-            eff_sub, is_member_pick = candidates[0]
-            can_view_submission = bool(
-                viewer_is_admin
-                or is_target_in_reviewer_scope(viewer, eff_sub.owner, activity_id=selected_activity_id)
+            candidates.sort(
+                key=lambda pair: (
+                    1 if sub_meta_by_id[pair[0]][1] in outcome_done_statuses else 0,
+                    1 if pair[0] in decl_done_sub_ids else 0,
+                    (
+                        status_rank_map.get(sub_meta_by_id[pair[0]][1], 0),
+                        1 if sub_meta_by_id[pair[0]][2] else 0,
+                        sub_meta_by_id[pair[0]][4],
+                    ),
+                    0 if not pair[1] else -1,
+                ),
+                reverse=True,
             )
+            eff_sid, is_member_pick = candidates[0]
+            eff_meta = sub_meta_by_id[eff_sid]
+            raw_draft = eff_meta[5] if isinstance(eff_meta[5], dict) else {}
             if is_member_pick:
                 participation_type = "team"
-                participation_role = "member"
-                leader = eff_sub.owner
-                leader_label = f"{leader.real_name or leader.username}（{leader.username}）" if can_view_submission else ""
-                participation_label = "团队申报（队员）"
             else:
-                raw_draft = eff_sub.draft_data if isinstance(eff_sub.draft_data, dict) else {}
                 is_team = raw_draft.get("declaration_type") == Submission.DeclarationType.TEAM or bool(
                     raw_draft.get("team_members")
                 )
                 participation_type = "team" if is_team else "individual"
-                participation_role = "leader" if is_team else "individual"
-                leader_label = ""
-                participation_label = "团队申报（队长）" if is_team else "个人申报"
-            if len(candidates) > 1:
-                participation_label = f"{participation_label} · 共 {len(candidates)} 项"
-        else:
-            eff_sub = None
-            can_view_submission = False
-            participation_type = "none"
-            participation_role = "none"
-            leader_label = ""
-            participation_label = "未申报"
-
-        if eff_sub is not None:
-            raw_draft = eff_sub.draft_data if isinstance(eff_sub.draft_data, dict) else {}
             project_name = str(raw_draft.get("project_name") or raw_draft.get("title") or "").strip()
-            decl_submitted = any(_sub_decl_done(sub) for sub, _ in candidates)
-            outcomes_submitted = any(_sub_outcomes_done(sub) for sub, _ in candidates)
-            status_code = eff_sub.status
-            status_label = eff_sub.get_status_display()
-            submission_id = str(eff_sub.id) if can_view_submission else ""
+            decl_submitted = any(sid in decl_done_sub_ids for sid, _ in candidates)
+            outcomes_submitted = any(sub_meta_by_id[sid][1] in outcome_done_statuses for sid, _ in candidates)
         else:
+            participation_type = "none"
             project_name = ""
             decl_submitted = False
             outcomes_submitted = False
-            status_code = "none"
-            status_label = "未提交"
-            submission_id = ""
 
-        all_rows.append(
-            {
-                "student_number": stu.username,
-                "real_name": stu.real_name or stu.username,
-                "class_name": stu.class_name or "-",
-                "class_display": format_user_class_label(stu) or "-",
-                "grade": stu.grade or "",
-                "major": stu.major or "",
-                "phone": stu.phone or "",
-                "participation_type": participation_type,
-                "participation_role": participation_role,
-                "participation_label": participation_label,
-                "team_leader_label": leader_label,
-                "project_name": project_name,
-                "declaration_submitted": decl_submitted,
-                "outcomes_submitted": outcomes_submitted,
-                "status_code": status_code,
-                "status_label": status_label,
-                "submission_id": submission_id,
-                "can_view_submission": can_view_submission,
+        if decl_submitted:
+            summary["decl_submitted"] += 1
+        else:
+            summary["decl_unsubmitted"] += 1
+        if outcomes_submitted:
+            summary["outcomes_submitted"] += 1
+        else:
+            summary["outcomes_unsubmitted"] += 1
+        if not decl_submitted or not outcomes_submitted:
+            summary["any_unsubmitted"] += 1
+        if not decl_submitted and not outcomes_submitted:
+            summary["both_unsubmitted"] += 1
+        if decl_submitted and outcomes_submitted:
+            summary["both_submitted"] += 1
+
+        if parsed_acct_class is not None:
+            stu_scope = {
+                "grade": str(grade or "").strip(),
+                "major": str(major or "").strip(),
+                "class_name": str(class_name or "").strip(),
             }
+            if not scope_matches_class_filter(stu_scope, parsed_acct_class):
+                continue
+        if acct_decl_type_filter in ("individual", "team", "none") and participation_type != acct_decl_type_filter:
+            continue
+        if q_lower:
+            display_name = (real_name or username or "").lower()
+            if (
+                q_lower not in (username or "").lower()
+                and q_lower not in display_name
+                and q_lower not in project_name.lower()
+            ):
+                continue
+        if acct_submit_filter == "any_unsubmitted" and (decl_submitted and outcomes_submitted):
+            continue
+        elif acct_submit_filter == "decl_unsubmitted" and decl_submitted:
+            continue
+        elif acct_submit_filter == "outcome_unsubmitted" and outcomes_submitted:
+            continue
+        elif acct_submit_filter == "both_unsubmitted" and (decl_submitted or outcomes_submitted):
+            continue
+        elif acct_submit_filter == "decl_only" and not (decl_submitted and not outcomes_submitted):
+            continue
+        elif acct_submit_filter == "both_submitted" and not (decl_submitted and outcomes_submitted):
+            continue
+
+        matched_user_ids.append(uid)
+
+    paginator = Paginator(matched_user_ids, acct_page_size)
+    page_obj = paginator.get_page(acct_page_num)
+    page_user_ids = list(page_obj.object_list)
+
+    page_rows = []
+    if page_user_ids:
+        users_by_id = {u.id: u for u in User.objects.filter(id__in=page_user_ids)}
+        page_users = [users_by_id[uid] for uid in page_user_ids if uid in users_by_id]
+        page_sub_id_set: set[uuid.UUID] = set()
+        for stu in page_users:
+            page_sub_id_set.update(own_sub_ids_by_uid.get(stu.id, []))
+            for sid in team_sub_ids_by_sn.get(stu.username, []):
+                if sid in sub_meta_by_id and sub_meta_by_id[sid][0] != stu.id:
+                    page_sub_id_set.add(sid)
+
+        page_subs_by_id = (
+            {
+                sub.id: sub
+                for sub in Submission.objects.select_related("owner").filter(id__in=page_sub_id_set)
+            }
+            if page_sub_id_set
+            else {}
         )
 
-    summary = {
-        "total": len(all_rows),
-        "decl_submitted": sum(1 for r in all_rows if r["declaration_submitted"]),
-        "decl_unsubmitted": sum(1 for r in all_rows if not r["declaration_submitted"]),
-        "outcomes_submitted": sum(1 for r in all_rows if r["outcomes_submitted"]),
-        "outcomes_unsubmitted": sum(1 for r in all_rows if not r["outcomes_submitted"]),
-        "any_unsubmitted": sum(1 for r in all_rows if (not r["declaration_submitted"] or not r["outcomes_submitted"])),
-        "both_unsubmitted": sum(1 for r in all_rows if (not r["declaration_submitted"] and not r["outcomes_submitted"])),
-        "both_submitted": sum(1 for r in all_rows if (r["declaration_submitted"] and r["outcomes_submitted"])),
-    }
+        for stu in page_users:
+            own_subs = [page_subs_by_id[sid] for sid in own_sub_ids_by_uid.get(stu.id, []) if sid in page_subs_by_id]
+            team_subs = [
+                page_subs_by_id[sid]
+                for sid in team_sub_ids_by_sn.get(stu.username, [])
+                if sid in page_subs_by_id and page_subs_by_id[sid].owner_id != stu.id
+            ]
+            candidates_objs: list[tuple[Submission, bool]] = [(s, False) for s in own_subs] + [
+                (s, True) for s in team_subs
+            ]
+            candidates_objs.sort(
+                key=lambda pair: (
+                    1 if pair[0].status in outcome_done_statuses else 0,
+                    1 if pair[0].id in decl_done_sub_ids else 0,
+                    _team_submission_priority(pair[0]),
+                    0 if not pair[1] else -1,
+                ),
+                reverse=True,
+            )
 
-    filtered_rows = all_rows
-    if acct_class_filter:
-        filtered_rows = [r for r in filtered_rows if r["class_name"] == acct_class_filter]
-    if acct_decl_type_filter in ("individual", "team", "none"):
-        filtered_rows = [r for r in filtered_rows if r["participation_type"] == acct_decl_type_filter]
-    if acct_q_filter:
-        q_lower = acct_q_filter.lower()
-        filtered_rows = [
-            r
-            for r in filtered_rows
-            if q_lower in r["student_number"].lower()
-            or q_lower in r["real_name"].lower()
-            or q_lower in r["project_name"].lower()
-        ]
-    if acct_submit_filter == "any_unsubmitted":
-        filtered_rows = [r for r in filtered_rows if (not r["declaration_submitted"] or not r["outcomes_submitted"])]
-    elif acct_submit_filter == "decl_unsubmitted":
-        filtered_rows = [r for r in filtered_rows if not r["declaration_submitted"]]
-    elif acct_submit_filter == "outcome_unsubmitted":
-        filtered_rows = [r for r in filtered_rows if not r["outcomes_submitted"]]
-    elif acct_submit_filter == "both_unsubmitted":
-        filtered_rows = [r for r in filtered_rows if (not r["declaration_submitted"] and not r["outcomes_submitted"])]
-    elif acct_submit_filter == "decl_only":
-        filtered_rows = [r for r in filtered_rows if (r["declaration_submitted"] and not r["outcomes_submitted"])]
-    elif acct_submit_filter == "both_submitted":
-        filtered_rows = [r for r in filtered_rows if (r["declaration_submitted"] and r["outcomes_submitted"])]
+            if candidates_objs:
+                eff_sub, is_member_pick = candidates_objs[0]
+                can_view_submission = bool(
+                    viewer_is_admin
+                    or is_target_in_reviewer_scope(viewer, eff_sub.owner, activity_id=selected_activity_id)
+                )
+                if is_member_pick:
+                    participation_type = "team"
+                    participation_role = "member"
+                    leader = eff_sub.owner
+                    leader_label = f"{leader.real_name or leader.username}（{leader.username}）" if can_view_submission else ""
+                    participation_label = "团队申报（队员）"
+                else:
+                    raw_draft = eff_sub.draft_data if isinstance(eff_sub.draft_data, dict) else {}
+                    is_team = raw_draft.get("declaration_type") == Submission.DeclarationType.TEAM or bool(
+                        raw_draft.get("team_members")
+                    )
+                    participation_type = "team" if is_team else "individual"
+                    participation_role = "leader" if is_team else "individual"
+                    leader_label = ""
+                    participation_label = "团队申报（队长）" if is_team else "个人申报"
+                if len(candidates_objs) > 1:
+                    participation_label = f"{participation_label} · 共 {len(candidates_objs)} 项"
+                raw_draft = eff_sub.draft_data if isinstance(eff_sub.draft_data, dict) else {}
+                project_name = str(raw_draft.get("project_name") or raw_draft.get("title") or "").strip()
+                decl_submitted = any(sub.id in decl_done_sub_ids for sub, _ in candidates_objs)
+                outcomes_submitted = any(sub.status in outcome_done_statuses for sub, _ in candidates_objs)
+                status_code = eff_sub.status
+                status_label = eff_sub.get_status_display()
+                submission_id = str(eff_sub.id) if can_view_submission else ""
+            else:
+                can_view_submission = False
+                participation_type = "none"
+                participation_role = "none"
+                leader_label = ""
+                participation_label = "未申报"
+                project_name = ""
+                decl_submitted = False
+                outcomes_submitted = False
+                status_code = "none"
+                status_label = "未提交"
+                submission_id = ""
+
+            page_rows.append(
+                {
+                    "student_number": stu.username,
+                    "real_name": stu.real_name or stu.username,
+                    "class_name": stu.class_name or "-",
+                    "class_display": format_user_class_label(stu) or "-",
+                    "grade": stu.grade or "",
+                    "major": stu.major or "",
+                    "phone": stu.phone or "",
+                    "participation_type": participation_type,
+                    "participation_role": participation_role,
+                    "participation_label": participation_label,
+                    "team_leader_label": leader_label,
+                    "project_name": project_name,
+                    "declaration_submitted": decl_submitted,
+                    "outcomes_submitted": outcomes_submitted,
+                    "status_code": status_code,
+                    "status_label": status_label,
+                    "submission_id": submission_id,
+                    "can_view_submission": can_view_submission,
+                }
+            )
 
     return {
-        "account_progress_rows": filtered_rows,
-        "account_progress_filtered_count": len(filtered_rows),
+        "account_progress_rows": page_rows,
+        "account_progress_filtered_count": paginator.count,
+        "account_progress_page_obj": page_obj,
+        "account_progress_page_range": _elided_page_range(page_obj),
+        "account_progress_query_without_page": _query_without_param(request, "acct_page"),
         "account_progress_summary": summary,
         "account_progress_classes": acct_classes,
         "acct_submit_filter": acct_submit_filter,
@@ -847,17 +1074,26 @@ def _build_reviewer_and_admin_context(request):
 
     status_filter = request.GET.get("status", "").strip()
     class_filter = (request.GET.get("class_name") or request.GET.get("class") or "").strip()
+    grade_filter = (request.GET.get("grade") or "").strip()
+    major_filter = (request.GET.get("major") or "").strip()
     category_filter = (request.GET.get("category") or "").strip()
     declaration_type_filter = normalize_declaration_type_filter(request.GET.get("declaration_type"))
     selected_submission_id = request.GET.get("submission_id", "").strip()
+    sub_page_num = request.GET.get("sub_page") or request.GET.get("page") or 1
+    sub_page_size = parse_page_size(
+        request.GET.get("sub_page_size") or request.GET.get("page_size"),
+        default=DASHBOARD_SUBMISSION_PAGE_SIZE,
+        maximum=WORKBENCH_MAX_PAGE_SIZE,
+    )
 
     submission_items = []
+    submission_page_obj = None
     available_classes = []
     declared_classes = []
     allowed_reviewer_classes = (
         None
         if is_admin
-        else reviewer_allowed_class_names(
+        else reviewer_allowed_class_labels(
             user, activity_id=selected_activity.id if selected_activity is not None else None
         )
     )
@@ -872,25 +1108,23 @@ def _build_reviewer_and_admin_context(request):
 
     if selected_activity is not None:
         ensure_standard_material_requirements(selected_activity)
-        base_qs = reviewable_submissions(user, selected_activity.id).select_related("owner")
-        for s in base_qs:
-            stats["total"] += 1
-            if s.status in stats:
-                stats[s.status] += 1
+        base_qs = reviewable_submissions(user, selected_activity.id)
+        stats = summarize_submission_counts(base_qs)
 
         if is_admin:
             declared_classes = list_activity_declared_classes(actor=user, activity_id=selected_activity.id)
-            user_classes = list(
-                User.objects.filter(role=User.Role.STUDENT)
+            user_classes = {
+                format_class_scope_label(g, m, c)
+                for g, m, c in User.objects.filter(role=User.Role.STUDENT)
                 .exclude(class_name="")
-                .order_by("class_name")
-                .values_list("class_name", flat=True)
+                .values_list("grade", "major", "class_name")
                 .distinct()
-            )
-            available_classes = sorted(set(declared_classes) | set(user_classes))
+                if str(c or "").strip()
+            }
+            available_classes = sorted(lbl for lbl in (set(declared_classes) | user_classes) if lbl)
         elif allowed_reviewer_classes:
             declared_classes = list_activity_declared_classes(actor=user, activity_id=selected_activity.id)
-            available_classes = sorted(set(declared_classes) | set(allowed_reviewer_classes))
+            available_classes = sorted(lbl for lbl in (set(declared_classes) | set(allowed_reviewer_classes)) if lbl)
         else:
             declared_classes = []
             available_classes = []
@@ -903,16 +1137,32 @@ def _build_reviewer_and_admin_context(request):
                     filtered_qs = filtered_qs.filter(status=resolved_status)
             except DomainError:
                 pass
-        if class_filter:
-            filtered_qs = filtered_qs.filter(owner__class_name=class_filter)
+        class_q = build_class_scope_q(class_filter, prefix="owner__", grade=grade_filter, major=major_filter)
+        if class_q:
+            filtered_qs = filtered_qs.filter(class_q)
         if category_filter:
             filtered_qs = filtered_qs.filter(draft_data__category=category_filter)
         decl_q = declaration_type_filter_q(declaration_type_filter)
         if decl_q is not None:
             filtered_qs = filtered_qs.filter(decl_q)
 
-        subs = list(filtered_qs.order_by("-updated_at")[:100])
-        uploads_by_submission = map_uploads_by_submission(subs, activity=selected_activity)
+        paginator = Paginator(
+            filtered_qs.select_related("owner")
+            .prefetch_related(
+                Prefetch(
+                    "review_records",
+                    queryset=ReviewRecord.objects.select_related("reviewer").order_by("-created_at"),
+                    to_attr="prefetched_review_records",
+                )
+            )
+            .order_by("-updated_at", "-created_at"),
+            sub_page_size,
+        )
+        submission_page_obj = paginator.get_page(sub_page_num)
+        subs = list(submission_page_obj.object_list)
+        uploads_by_submission = (
+            map_uploads_by_submission(subs, activity=selected_activity) if subs else {}
+        )
 
         for s in subs:
             serialized = serialize_submission_for_review(s, uploads_by_submission=uploads_by_submission)
@@ -964,6 +1214,10 @@ def _build_reviewer_and_admin_context(request):
         "export_classes": export_classes,
         "stats": stats,
         "submission_items": submission_items,
+        "submission_page_obj": submission_page_obj,
+        "submission_page_range": _elided_page_range(submission_page_obj),
+        "submission_total_count": submission_page_obj.paginator.count if submission_page_obj is not None else 0,
+        "submission_query_without_page": _query_without_param(request, "sub_page"),
     }
     if is_admin or is_reviewer(user):
         ctx.update(_build_admin_account_progress(request, selected_activity, actor=user))
@@ -1032,9 +1286,11 @@ def student_save_draft_view(request):
         activity_id = request.POST.get("activity_id", "").strip()
         submission_id = request.POST.get("submission_id", "").strip()
         if submission_id:
-            sub = get_object_or_404(Submission, pk=submission_id, owner=request.user)
+            sub_uuid = _parse_uuid_or_domain_error(submission_id, "submission_id")
+            sub = get_object_or_404(Submission, pk=sub_uuid, owner=request.user)
         elif activity_id:
-            sub = create_draft(actor=request.user, activity_id=uuid.UUID(activity_id))
+            act_uuid = _parse_uuid_or_domain_error(activity_id, "activity_id")
+            sub = create_draft(actor=request.user, activity_id=act_uuid)
         else:
             raise DomainError("缺少活动或申报记录标识。")
 
@@ -1182,7 +1438,8 @@ def admin_save_activity_view(request):
             )
 
         if activity_id:
-            act = get_object_or_404(Activity, pk=activity_id)
+            act_uuid = _parse_uuid_or_domain_error(activity_id, "activity_id")
+            act = get_object_or_404(Activity, pk=act_uuid)
             if title:
                 act.title = title
             act.opens_at = opens_at
@@ -1204,7 +1461,7 @@ def admin_save_activity_view(request):
             )
             action_name = "activity.created"
 
-        ensure_standard_material_requirements(act)
+        ensure_standard_material_requirements(act, sync_existing=True)
         record(
             actor=request.user,
             action=action_name,
@@ -1281,6 +1538,8 @@ def _build_review_workbench_context(request):
     selected_activity = next((act for act in activities if str(act.id) == activity_id), None)
 
     class_filter = (request.GET.get("class_name") or request.GET.get("class") or "").strip()
+    grade_filter = (request.GET.get("grade") or "").strip()
+    major_filter = (request.GET.get("major") or "").strip()
     category_filter = (request.GET.get("category") or "").strip()
     declaration_type_filter = normalize_declaration_type_filter(request.GET.get("declaration_type"))
     raw_status_filter = (request.GET.get("status") or "").strip()
@@ -1294,6 +1553,12 @@ def _build_review_workbench_context(request):
     else:
         status_filter = ""
     late_filter = (request.GET.get("late") or "").strip()
+    page_num = request.GET.get("page") or 1
+    page_size = parse_page_size(
+        request.GET.get("page_size"),
+        default=WORKBENCH_PAGE_SIZE,
+        maximum=WORKBENCH_MAX_PAGE_SIZE,
+    )
 
     whitelist_numbers = workbench_whitelist_numbers(activities=activities, activity_id=activity_id or None)
     if not is_admin and whitelist_numbers:
@@ -1308,16 +1573,23 @@ def _build_review_workbench_context(request):
             ).values_list("username", flat=True)
         )
         whitelist_numbers = [sn for sn in whitelist_numbers if sn in scoped_sns]
-    rows, _ = collect_workbench_rows(
+    page_data = collect_workbench_page(
         user=user,
         activity_id=activity_id or None,
         class_name=class_filter,
+        grade=grade_filter,
+        major=major_filter,
         category=category_filter,
         declaration_type=declaration_type_filter,
         status=status_filter,
         late=late_filter,
         whitelist_numbers=whitelist_numbers,
+        page=page_num,
+        page_size=page_size,
     )
+    rows = page_data["rows"]
+    page_obj = page_data["page_obj"]
+    counts = page_data["counts"]
     category_options = (
         selected_activity.get_project_categories()
         if selected_activity is not None
@@ -1325,14 +1597,6 @@ def _build_review_workbench_context(request):
     )
 
     status_options = [{"code": code, "label": label, "tone": tone} for code, label, tone in Submission.BADGE_ORDER]
-    counts = {
-        "total": len(rows),
-        "late": sum(1 for row in rows if row["is_late"]),
-        "pending_first_review": sum(1 for row in rows if row["status_code"] == Submission.Status.PENDING_FIRST_REVIEW),
-        "pending_final_review": sum(1 for row in rows if row["status_code"] == Submission.Status.PENDING_FINAL_REVIEW),
-        "final_approved": sum(1 for row in rows if row["status_code"] == Submission.Status.FINAL_APPROVED),
-        "returned": sum(1 for row in rows if row["status_code"] == Submission.Status.RETURNED),
-    }
 
     whitelist_invalid = request.session.pop("late_whitelist_invalid", [])
     late_settings_saved = request.session.pop("late_settings_saved", False)
@@ -1344,7 +1608,7 @@ def _build_review_workbench_context(request):
     allowed_reviewer_classes = (
         None
         if is_admin
-        else reviewer_allowed_class_names(
+        else reviewer_allowed_class_labels(
             user, activity_id=selected_activity.id if selected_activity is not None else None
         )
     )
@@ -1365,6 +1629,9 @@ def _build_review_workbench_context(request):
         "category_options": category_options,
         "status_options": status_options,
         "rows": rows,
+        "page_obj": page_obj,
+        "page_range": _elided_page_range(page_obj),
+        "workbench_query_without_page": _query_without_param(request, "page"),
         "counts": counts,
         "whitelist_numbers": whitelist_numbers,
         "whitelist_text": whitelist_text,
